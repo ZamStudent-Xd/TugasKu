@@ -790,6 +790,7 @@ export async function sendTaskInvitation(data: {
   courseName?: string;
   invitedEmail: string;
   inviterUser: UserProfile;
+  task?: Task;
 }): Promise<{ success: boolean; invitation?: TaskInvitation; error?: string }> {
   const cleanEmail = data.invitedEmail.trim().toLowerCase();
   const invitations = getTaskInvitations();
@@ -826,13 +827,13 @@ export async function sendTaskInvitation(data: {
   invitations.unshift(newInvitation);
   saveTaskInvitations(invitations);
 
-  // Sinkronkan ke Server DB
+  // Sinkronkan ke Server DB & Supabase Cloud
   if (typeof window !== "undefined") {
     try {
       await fetch("/api/db/invitations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ invitation: newInvitation }),
+        body: JSON.stringify({ invitation: newInvitation, task: data.task }),
       });
     } catch (e) {
       console.warn("Gagal simpan undangan ke server DB:", e);

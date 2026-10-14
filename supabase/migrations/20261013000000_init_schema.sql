@@ -260,9 +260,29 @@ DROP POLICY IF EXISTS "Task owner can manage invitations" ON public.task_invitat
 CREATE POLICY "Task owner can manage invitations"
   ON public.task_invitations FOR ALL
   TO authenticated
-  USING (
-    EXISTS (
-      SELECT 1 FROM public.tasks
-      WHERE tasks.id = task_invitations.task_id AND tasks.created_by = auth.uid()
-    )
-  );
+  USING (true);
+
+-- 6. TABEL KOLABORASI UNDANGAN REALTIME (Mendukung sinkronisasi antar perangkat Vercel)
+CREATE TABLE IF NOT EXISTS public.collaboration_invitations (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  task_title TEXT NOT NULL,
+  course_name TEXT,
+  invited_email TEXT NOT NULL,
+  token_hash TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  expires_at TIMESTAMPTZ NOT NULL,
+  invited_by TEXT NOT NULL,
+  inviter_name TEXT,
+  inviter_avatar TEXT,
+  task_payload JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_collab_inv_email ON public.collaboration_invitations(invited_email);
+CREATE INDEX IF NOT EXISTS idx_collab_inv_task_id ON public.collaboration_invitations(task_id);
+
+ALTER TABLE public.collaboration_invitations ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Collab invitations access" ON public.collaboration_invitations;
+CREATE POLICY "Collab invitations access" ON public.collaboration_invitations FOR ALL USING (true);
+

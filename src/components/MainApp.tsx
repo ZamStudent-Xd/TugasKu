@@ -198,6 +198,9 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
     const id = `toast-${Date.now()}-${Math.random()}`;
     // Ganti alert sebelumnya dengan alert baru secara instan, jangan menumpuk
     setToasts([{ id, type, message }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 4500);
   };
 
   const dismissToast = (id: string) => {
@@ -232,7 +235,7 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
     }
     initAuthAndData();
 
-    // Listener realtime autentikasi (misal jika user mengklik link verifikasi di email)
+    // Listener realtime autentikasi (sinkronkan state jika user login/logout di tab lain)
     if (isSupabaseConfigured && supabase) {
       const {
         data: { subscription },
@@ -250,7 +253,6 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
               setCourses(cData);
               setTasks(tData);
               setInvitations(iData);
-              addToast("success", `Verifikasi email berhasil! Selamat datang, ${activeUser.fullName}!`);
             }
           }
         } else if (event === "SIGNED_OUT") {
@@ -823,6 +825,7 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
           courseName: courseObj?.name,
           invitedEmail: targetEmail,
           inviterUser: user,
+          task: taskObj,
         });
 
         if (!invRes.success) {
