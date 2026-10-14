@@ -266,6 +266,37 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
     }
   }, []);
 
+  // Realtime Listener untuk Undangan Kolaborasi Baru
+  useEffect(() => {
+    if (!user?.email || !isSupabaseConfigured || !supabase) return;
+
+    const client = supabase;
+    const cleanEmail = user.email.toLowerCase().trim();
+    const channel = client
+      .channel(`realtime-invitations-${cleanEmail}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "collaboration_invitations",
+          filter: `invited_email=eq.${cleanEmail}`,
+        },
+        async (payload) => {
+          const fresh = await fetchTaskInvitations(cleanEmail);
+          setInvitations(fresh);
+          if (payload.eventType === "INSERT") {
+            addToast("info", "📩 Anda menerima undangan kolaborasi tugas kelompok baru!");
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      client.removeChannel(channel);
+    };
+  }, [user?.email]);
+
   const handleUpdateProfile = async (updated: UserProfile) => {
     const saved = await updateUserProfile(updated);
     setUser(saved);

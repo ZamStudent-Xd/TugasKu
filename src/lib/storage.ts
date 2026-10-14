@@ -764,16 +764,56 @@ export function saveTaskInvitations(invitations: TaskInvitation[]): void {
 }
 
 export async function fetchTaskInvitations(currentUserEmail?: string): Promise<TaskInvitation[]> {
-  const activeEmail = currentUserEmail || getCurrentUser()?.email;
+  const activeEmail = (currentUserEmail || getCurrentUser()?.email || "").toLowerCase().trim();
+  if (!activeEmail) return [];
 
-  if (typeof window !== "undefined" && activeEmail) {
+  const invitationsMap = new Map<string, TaskInvitation>();
+
+  // 1. Ambil langsung dari Supabase Cloud jika terkonfigurasi (sumber data utama)
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { data, error } = await supabase
+        .from("collaboration_invitations")
+        .select("*")
+        .eq("invited_email", activeEmail)
+        .order("created_at", { ascending: false });
+
+      if (!error && Array.isArray(data)) {
+        for (const row of data) {
+          const inv: TaskInvitation = {
+            id: row.id,
+            taskId: row.task_id,
+            taskTitle: row.task_title,
+            courseName: row.course_name,
+            invitedEmail: row.invited_email,
+            tokenHash: row.token_hash,
+            status: row.status as any,
+            expiresAt: row.expires_at,
+            invitedBy: row.invited_by,
+            inviterName: row.inviter_name,
+            inviterAvatar: row.inviter_avatar,
+            createdAt: row.created_at,
+          };
+          invitationsMap.set(inv.id, inv);
+        }
+      }
+    } catch (err) {
+      console.warn("[INVITATIONS] Supabase direct fetch note:", err);
+    }
+  }
+
+  // 2. Ambil dari Server Database API (Next.js route)
+  if (typeof window !== "undefined") {
     try {
       const res = await fetch(`/api/db/invitations?email=${encodeURIComponent(activeEmail)}`);
       if (res.ok) {
         const json = await res.json();
         if (json.success && Array.isArray(json.invitations)) {
-          saveTaskInvitations(json.invitations);
-          return json.invitations;
+          for (const inv of json.invitations) {
+            if (!invitationsMap.has(inv.id)) {
+              invitationsMap.set(inv.id, inv);
+            }
+          }
         }
       }
     } catch (e) {
@@ -781,7 +821,17 @@ export async function fetchTaskInvitations(currentUserEmail?: string): Promise<T
     }
   }
 
-  return getTaskInvitations(activeEmail);
+  // 3. Gabungkan dengan penyimpanan lokal
+  const localList = getTaskInvitations(activeEmail);
+  for (const inv of localList) {
+    if (!invitationsMap.has(inv.id)) {
+      invitationsMap.set(inv.id, inv);
+    }
+  }
+
+  const result = Array.from(invitationsMap.values());
+  saveTaskInvitations(result);
+  return result;
 }
 
 export async function sendTaskInvitation(data: {
@@ -827,7 +877,29 @@ export async function sendTaskInvitation(data: {
   invitations.unshift(newInvitation);
   saveTaskInvitations(invitations);
 
-  // Sinkronkan ke Server DB & Supabase Cloud
+  // 1. Simpan langsung ke Supabase Cloud jika terkonfigurasi
+  if (isSupabaseConfigured && supabase) {
+    try {
+      await supabase.from("collaboration_invitations").upsert({
+        id: newInvitation.id,
+        task_id: newInvitation.taskId,
+        task_title: newInvitation.taskTitle,
+        course_name: newInvitation.courseName || "",
+        invited_email: cleanEmail,
+        token_hash: newInvitation.tokenHash,
+        status: newInvitation.status,
+        expires_at: newInvitation.expiresAt,
+        invited_by: newInvitation.invitedBy,
+        inviter_name: newInvitation.inviterName || "",
+        inviter_avatar: newInvitation.inviterAvatar || "",
+        task_payload: data.task || null,
+      });
+    } catch (err) {
+      console.warn("[INVITATIONS] Supabase direct upsert note:", err);
+    }
+  }
+
+  // 2. Sinkronkan ke Server DB (Next.js route)
   if (typeof window !== "undefined") {
     try {
       await fetch("/api/db/invitations", {
@@ -847,6 +919,18 @@ export async function acceptTaskInvitation(
   invitationId: string,
   currentUser: UserProfile
 ): Promise<{ success: boolean; task?: Task; newCourseAdded?: Course; error?: string }> {
+  // Update status di Supabase jika aktif
+  if (isSupabaseConfigured && supabase) {
+    try {
+      await supabase
+        .from("collaboration_invitations")
+        .update({ status: "accepted" })
+        .eq("id", invitationId);
+    } catch (err) {
+      console.warn("[INVITATIONS] Supabase update status note:", err);
+    }
+  }
+
   // 1. Panggil API server agar status undangan, penambahan anggota ke task.members, dan mata kuliah diproses secara atomik
   let serverResult: { success: boolean; task?: Task; course?: Course; newCourseAdded?: Course; invitation?: TaskInvitation; error?: string } | null = null;
   if (typeof window !== "undefined") {
