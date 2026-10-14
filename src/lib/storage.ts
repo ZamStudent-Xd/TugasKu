@@ -977,7 +977,40 @@ export async function fetchRegisteredStudents(query?: string): Promise<UserProfi
   const list: UserProfile[] = [];
   const seenEmails = new Set<string>();
 
-  // 1. Ambil dari Server Database API
+  // 1. Ambil dari Supabase Profiles langsung jika terkonfigurasi
+  if (isSupabaseConfigured && supabase) {
+    try {
+      let supaQuery = supabase.from("profiles").select("*");
+      if (query && query.trim()) {
+        const q = query.trim();
+        supaQuery = supaQuery.or(`full_name.ilike.%${q}%,nim.ilike.%${q}%,email.ilike.%${q}%`);
+      }
+      const { data, error } = await supaQuery;
+      if (!error && Array.isArray(data)) {
+        for (const row of data) {
+          const clean = row.email?.toLowerCase().trim();
+          if (clean && !seenEmails.has(clean)) {
+            list.push({
+              id: row.id,
+              fullName: row.full_name,
+              email: row.email,
+              nim: row.nim || "",
+              major: row.major || "Teknologi Informasi",
+              semester: row.semester || 1,
+              campus: row.campus || "Universitas BSI (Bina Sarana Informatika)",
+              avatarUrl: row.avatar_url || `https://api.dicebear.com/7.x/bottts/svg?seed=${row.nim || row.id}`,
+              createdAt: row.created_at,
+            });
+            seenEmails.add(clean);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("Supabase profiles fetch note:", err);
+    }
+  }
+
+  // 1.5 Ambil dari Server Database API (yang juga memeriksa Supabase di server)
   if (typeof window !== "undefined") {
     try {
       const qParam = query && query.trim() ? `?q=${encodeURIComponent(query.trim())}` : "";
@@ -1304,8 +1337,22 @@ export async function loginStudent(
           createdAt: data.user.created_at,
         };
 
+        // Cache lokal agar sesi login tersimpan di browser
+        const accs = getRegisteredAccounts();
+        if (!accs.some((a) => a.user.email.toLowerCase() === cleanEmail)) {
+          accs.push({ user: userProfile, password });
+          saveRegisteredAccounts(accs);
+        }
+
         saveCurrentUser(userProfile);
         return { success: true, user: userProfile };
+      } else if (error) {
+        if (error.message?.includes("Invalid login credentials") || (error as any).code === "invalid_credentials") {
+          return { success: false, error: "Password yang Anda masukkan salah atau email belum terdaftar" };
+        }
+        if (error.message?.includes("Email not confirmed") || (error as any).code === "email_not_confirmed") {
+          return { success: false, error: "Akun belum aktif di Supabase. Pastikan opsi 'Confirm email' dimatikan di Supabase Dashboard." };
+        }
       }
     } catch (err: any) {
       console.warn("Supabase Auth fallback:", err);
@@ -1555,6 +1602,8 @@ export async function verifyStudentRegistration(
 
       const authUserId = authRes?.user?.id;
       if (authUserId) {
+        item.user.id = authUserId;
+        saveCurrentUser(item.user);
         await supabase.from("profiles").upsert({
           id: authUserId,
           full_name: item.user.fullName,
