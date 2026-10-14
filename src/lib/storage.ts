@@ -71,6 +71,147 @@ function saveLocalTasks(tasks: Task[]) {
   }
 }
 
+/**
+ * Membersihkan dan mendeduplikasi daftar anggota tugas kelompok (TaskMember[]).
+ * - Menghilangkan data duplikat yang hanya berisi NIM (misal "19251525") jika sudah ada nama asli mahasiswa.
+ * - Menggabungkan entri duplikat berdasarkan ID profil, email, atau NIM.
+ * - Memprioritaskan nama asli lengkap, avatar, dan role "owner".
+ */
+export function cleanAndDeduplicateMembers(
+  members: TaskMember[],
+  studentsList?: UserProfile[]
+): TaskMember[] {
+  if (!Array.isArray(members) || members.length === 0) return [];
+
+  let students = studentsList;
+  if (!students || students.length === 0) {
+    try {
+      students = getAllRegisteredStudents();
+    } catch {
+      students = [];
+    }
+  }
+
+  const isDigitOnly = (str: string) => /^\d+$/.test(str.trim());
+  const deduplicatedMap = new Map<string, TaskMember>();
+
+  for (const m of members) {
+    if (!m) continue;
+    const rawUserId = (m.userId || "").trim();
+    const rawName = (m.fullName || "").trim();
+    const lowerName = rawName.toLowerCase();
+    const lowerUserId = rawUserId.toLowerCase();
+
+    // 1. Cari kecocokan profil mahasiswa
+    const matchedStudent = students.find((s) => {
+      if (s.id && s.id.toLowerCase() === lowerUserId) return true;
+      if (s.email && s.email.toLowerCase().trim() === lowerUserId) return true;
+      if (s.fullName && s.fullName.toLowerCase().trim() === lowerName) return true;
+      if (s.nim && (lowerName === s.nim.toLowerCase().trim() || lowerUserId.includes(s.nim.toLowerCase().trim()))) return true;
+      if (lowerUserId.includes("@") && s.email && s.email.toLowerCase().startsWith(lowerUserId.split("@")[0])) return true;
+      return false;
+    });
+
+    // 2. Kunci kanonikal identitas orang ini
+    let canonicalKey = "";
+    if (matchedStudent) {
+      canonicalKey = `student:${(matchedStudent.id || matchedStudent.email).toLowerCase().trim()}`;
+    } else if (lowerUserId.includes("@")) {
+      canonicalKey = `email:${lowerUserId}`;
+    } else if (isDigitOnly(rawName)) {
+      canonicalKey = `nim:${lowerName}`;
+    } else if (lowerName) {
+      canonicalKey = `name:${lowerName}`;
+    } else {
+      canonicalKey = `user:${lowerUserId}`;
+    }
+
+    // 3. Properti nama & ID yang disempurnakan
+    let resolvedFullName = rawName;
+    let resolvedUserId = rawUserId;
+    let resolvedAvatar = m.avatarUrl;
+
+    if (matchedStudent) {
+      if (matchedStudent.fullName && (!resolvedFullName || isDigitOnly(resolvedFullName) || resolvedFullName === matchedStudent.nim)) {
+        resolvedFullName = matchedStudent.fullName;
+      }
+      if (matchedStudent.id && (!resolvedUserId || resolvedUserId.includes("@"))) {
+        resolvedUserId = matchedStudent.id;
+      }
+      if (matchedStudent.avatarUrl) {
+        resolvedAvatar = matchedStudent.avatarUrl;
+      }
+    }
+
+    const candidate: TaskMember = {
+      ...m,
+      userId: resolvedUserId,
+      fullName: resolvedFullName,
+      avatarUrl: resolvedAvatar,
+    };
+
+    if (!deduplicatedMap.has(canonicalKey)) {
+      deduplicatedMap.set(canonicalKey, candidate);
+    } else {
+      const existing = deduplicatedMap.get(canonicalKey)!;
+      const isCandidateOwner = candidate.role === "owner";
+      const isExistingOwner = existing.role === "owner";
+
+      // Nama terbaik: prioritaskan nama manusia bukan angka NIM
+      let bestName = existing.fullName;
+      if (isDigitOnly(bestName) && !isDigitOnly(candidate.fullName)) {
+        bestName = candidate.fullName;
+      } else if (!bestName && candidate.fullName) {
+        bestName = candidate.fullName;
+      }
+
+      // ID terbaik: prioritaskan UUID dibanding email
+      let bestUserId = existing.userId;
+      if (bestUserId.includes("@") && !candidate.userId.includes("@")) {
+        bestUserId = candidate.userId;
+      }
+
+      // Avatar terbaik
+      let bestAvatar = existing.avatarUrl || candidate.avatarUrl;
+      if (matchedStudent?.avatarUrl) {
+        bestAvatar = matchedStudent.avatarUrl;
+      }
+
+      deduplicatedMap.set(canonicalKey, {
+        userId: bestUserId,
+        taskId: candidate.taskId || existing.taskId,
+        fullName: bestName,
+        avatarUrl: bestAvatar,
+        role: isCandidateOwner || isExistingOwner ? "owner" : "member",
+        joinedAt: existing.joinedAt || candidate.joinedAt || new Date().toISOString(),
+      });
+    }
+  }
+
+  // Filter pengaman kedua: buang entri duplikat yang hanya berisi digit angka jika saudara nama aslinya sudah ada
+  const result = Array.from(deduplicatedMap.values());
+  const finalMembers: TaskMember[] = [];
+
+  for (const item of result) {
+    if (isDigitOnly(item.fullName)) {
+      const matchedProfile = students.find(
+        (s) => s.nim === item.fullName || (s.email && s.email.toLowerCase().startsWith(item.fullName.toLowerCase() + "@"))
+      );
+      if (matchedProfile) {
+        const hasHumanSibling = result.some(
+          (other) => other !== item && other.fullName.toLowerCase().trim() === matchedProfile.fullName.toLowerCase().trim()
+        );
+        if (hasHumanSibling) {
+          continue;
+        }
+      }
+    }
+    finalMembers.push(item);
+  }
+
+  return finalMembers;
+}
+
 // ============================================================================
 // OPERASI MATA KULIAH (COURSES)
 // ============================================================================
@@ -378,7 +519,8 @@ export async function deleteCourse(
 ): Promise<{ courses: Course[]; tasks: Task[] }> {
   const activeUser = userParam || getCurrentUser();
   const userId = activeUser?.id;
-  const email = activeUser?.email;
+  const email = activeUser?.email?.toLowerCase().trim();
+  const nim = activeUser?.nim?.toLowerCase().trim();
 
   const qParams = new URLSearchParams({ id });
   if (userId) qParams.set("userId", userId);
@@ -392,8 +534,14 @@ export async function deleteCourse(
     }
   }
 
+  // 1. Hapus dari Supabase cloud (tabel courses) jika aktif
   if (isSupabaseConfigured && supabase) {
     try {
+      let query = supabase.from("courses").delete().eq("id", id);
+      if (userId) {
+        query = query.eq("owner_id", userId);
+      }
+      await query;
       await supabase
         .from("collaboration_invitations")
         .delete()
@@ -409,9 +557,9 @@ export async function deleteCourse(
 
   const courses = existingCourses.filter((c) => c.id !== id);
 
-  // Bersihkan tugas lokal:
-  // - Tugas kolaborasi milik ketua: lepas dari tampilan lokal anggota ini
-  // - Tugas milik sendiri: hapus (cascade)
+  // 2. Bersihkan tugas lokal & lepas keanggotaan kolaborasi:
+  // - Tugas kolaborasi milik ketua: lepaskan keanggotaan anggota ini secara tuntas (baik di cloud maupun lokal)
+  // - Tugas milik sendiri: hapus permanen (cascade)
   const localTasks = getLocalTasks();
   const remainingTasks: Task[] = [];
 
@@ -427,14 +575,57 @@ export async function deleteCourse(
 
     const isCreatedByOther =
       (userId && t.createdBy !== userId) ||
-      (email && t.createdBy?.toLowerCase().trim() !== email.toLowerCase().trim());
+      (email && t.createdBy?.toLowerCase().trim() !== email);
 
     if (t.taskType === "group" && isCreatedByOther) {
-      // Tugas kolaborasi ketua: dilepaskan dari lokal anggota ini
+      // ANGGOTA MENGHAPUS MATA KULIAH TUGAS KELOMPOK:
+      // Anggota ini otomatis KELUAR dari tugas kelompok di Supabase & dashboard ketua!
+      try {
+        await removeMemberFromTask(t.id, userId || email || "");
+      } catch (err) {
+        console.warn("Gagal mengeluarkan anggota dari tugas kolaborasi:", err);
+      }
       continue;
     }
 
-    // Tugas milik sendiri: tidak dimasukkan ke remainingTasks (terhapus)
+    // Tugas milik sendiri: hapus permanen tugas bersama mata kuliahnya
+    try {
+      await deleteTask(t.id);
+    } catch (err) {
+      console.warn("Gagal menghapus tugas milik sendiri:", err);
+    }
+  }
+
+  // 3. Pemindaian cloud Supabase: lepaskan user dari tugas kelompok yang tertaut dengan matakuliah ini
+  if (isSupabaseConfigured && supabase && (email || userId)) {
+    try {
+      const { data: userCollabRows } = await supabase
+        .from("collaboration_invitations")
+        .select("*");
+
+      if (Array.isArray(userCollabRows)) {
+        for (const row of userCollabRows) {
+          const rowCourse = (row.course_name || row.task_payload?.courseName || "").toLowerCase().trim();
+          const isMatchCourse =
+            (targetCourseName && rowCourse === targetCourseName) ||
+            row.task_payload?.courseId === id;
+
+          if (isMatchCourse && row.task_id) {
+            const rowInvitedEmail = (row.invited_email || "").toLowerCase().trim();
+            const isUserRow =
+              (email && rowInvitedEmail === email) ||
+              (nim && rowInvitedEmail.startsWith(nim + "@")) ||
+              (userId && row.invited_by !== userId && row.task_payload?.members?.some((m: any) => m.userId === userId));
+
+            if (isUserRow) {
+              await removeMemberFromTask(row.task_id, userId || email || "");
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("Gagal membersihkan tugas kolaborasi cloud:", err);
+    }
   }
 
   const tasks = syncTasksWithAutoPoints(remainingTasks);
@@ -451,7 +642,17 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
   const activeUser = userParam || getCurrentUser();
   const userId = activeUser?.id;
   const cleanEmail = activeUser?.email?.toLowerCase().trim() || "";
+  const userNim = (activeUser?.nim || "").toLowerCase().trim();
+  const userFullName = (activeUser?.fullName || "").toLowerCase().trim();
   const tasksMap = new Map<string, Task>();
+
+  // Ambil daftar seluruh mahasiswa terdaftar untuk resolusi nama & deduplikasi mutlak
+  let allStudents: UserProfile[] = [];
+  try {
+    allStudents = await fetchRegisteredStudents();
+  } catch {
+    allStudents = getAllRegisteredStudents();
+  }
 
   // 1. Ambil tugas kolaborasi cloud dari Supabase (collaboration_invitations)
   if (isSupabaseConfigured && supabase && (userId || cleanEmail)) {
@@ -467,7 +668,6 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
             const rowInvitedEmail = (row.invited_email || "").toLowerCase().trim();
             const rowInvitedBy = (row.invited_by || "").toLowerCase().trim();
             const rowInviterName = (row.inviter_name || "").toLowerCase().trim();
-            const userFullName = (activeUser?.fullName || "").toLowerCase().trim();
 
             const isInviter =
               (userId && (rowInvitedBy === userId.toLowerCase() || t.createdBy === userId)) ||
@@ -476,25 +676,42 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
 
             const isMember =
               (cleanEmail && rowInvitedEmail === cleanEmail && row.status === "accepted") ||
+              (userNim && rowInvitedEmail.startsWith(userNim + "@") && row.status === "accepted") ||
               (t.members && t.members.some((m) =>
                 (userId && m.userId === userId) ||
                 (cleanEmail && m.userId?.toLowerCase().trim() === cleanEmail) ||
-                (userFullName && m.fullName?.toLowerCase().trim() === userFullName)
+                (userFullName && m.fullName?.toLowerCase().trim() === userFullName) ||
+                (userNim && (m.fullName?.toLowerCase().trim() === userNim || m.userId?.includes(userNim)))
               ));
 
             if (isInviter || isMember) {
-              // Jika status diterima, pastikan anggota yang di-invite tertera di members untuk semua pihak
+              // Jika status diterima, pastikan anggota terdaftar di t.members dengan nama asli, BUKAN duplikat NIM
               if (row.status === "accepted" && rowInvitedEmail) {
                 const members = t.members || [];
-                const alreadyMember = members.some(
-                  (m) =>
-                    (userId && m.userId === userId && rowInvitedEmail === cleanEmail) ||
-                    (userFullName && m.fullName?.toLowerCase().trim() === userFullName && rowInvitedEmail === cleanEmail) ||
-                    (m.userId && m.userId.toLowerCase().trim() === rowInvitedEmail) ||
-                    (m.fullName && m.fullName.toLowerCase().trim() === rowInvitedEmail)
-                );
+                const student = allStudents.find((s) => s.email.toLowerCase().trim() === rowInvitedEmail);
+
+                const alreadyMember = members.some((m) => {
+                  const mUser = (m.userId || "").toLowerCase().trim();
+                  const mName = (m.fullName || "").toLowerCase().trim();
+                  const mEmail = ((m as any).email || "").toLowerCase().trim();
+
+                  if (mEmail && mEmail === rowInvitedEmail) return true;
+                  if (mUser === rowInvitedEmail) return true;
+                  if (cleanEmail && rowInvitedEmail === cleanEmail) {
+                    if (userId && mUser === userId.toLowerCase()) return true;
+                    if (userFullName && mName === userFullName) return true;
+                  }
+                  if (student) {
+                    if (student.id && mUser === student.id.toLowerCase()) return true;
+                    if (student.fullName && mName === student.fullName.toLowerCase().trim()) return true;
+                    if (student.nim && (mName === student.nim.toLowerCase().trim() || mUser.includes(student.nim.toLowerCase().trim()))) return true;
+                  }
+                  if (mName === rowInvitedEmail.split("@")[0].toLowerCase().trim()) return true;
+                  return false;
+                });
+
                 if (!alreadyMember) {
-                  const memberToAdd = (rowInvitedEmail === cleanEmail && activeUser)
+                  const memberToAdd: TaskMember = (rowInvitedEmail === cleanEmail && activeUser)
                     ? {
                         userId: userId || rowInvitedEmail,
                         taskId: t.id,
@@ -504,17 +721,34 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
                         joinedAt: row.created_at || new Date().toISOString(),
                       }
                     : {
-                        userId: rowInvitedEmail,
+                        userId: student?.id || rowInvitedEmail,
                         taskId: t.id,
-                        fullName: rowInvitedEmail.split("@")[0],
-                        avatarUrl: `https://api.dicebear.com/7.x/bottts/svg?seed=${rowInvitedEmail}`,
+                        fullName: student?.fullName || rowInvitedEmail.split("@")[0],
+                        avatarUrl: student?.avatarUrl || `https://api.dicebear.com/7.x/bottts/svg?seed=${rowInvitedEmail}`,
                         role: "member" as const,
                         joinedAt: row.created_at || new Date().toISOString(),
                       };
                   t.members = [...members, memberToAdd];
                 }
               }
-              tasksMap.set(t.id, t);
+
+              // Bersihkan dan deduplikasi anggota
+              t.members = cleanAndDeduplicateMembers(t.members || [], allStudents);
+
+              if (!tasksMap.has(t.id)) {
+                tasksMap.set(t.id, t);
+              } else {
+                const existing = tasksMap.get(t.id)!;
+                const mergedMembers = cleanAndDeduplicateMembers(
+                  [...(existing.members || []), ...(t.members || [])],
+                  allStudents
+                );
+                tasksMap.set(t.id, {
+                  ...existing,
+                  ...t,
+                  members: mergedMembers,
+                });
+              }
             }
           }
         }
@@ -538,6 +772,7 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
         if (json.success && Array.isArray(json.tasks) && json.tasks.length > 0) {
           for (const t of json.tasks) {
             if (!tasksMap.has(t.id)) {
+              t.members = cleanAndDeduplicateMembers(t.members || [], allStudents);
               tasksMap.set(t.id, t);
             }
           }
@@ -557,6 +792,7 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
           t.createdBy === activeUser.id ||
           (t.createdBy && t.createdBy.toLowerCase().trim() === cleanEmail);
         if (isOwner) {
+          t.members = cleanAndDeduplicateMembers(t.members || [], allStudents);
           tasksMap.set(t.id, t);
         } else {
           // Jika Supabase aktif, tugas kolaborasi yang tidak ada di cloud untuk user ini
@@ -570,17 +806,23 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
                   (m.userId && m.userId.toLowerCase().trim() === cleanEmail)
               );
             if (isParticipant) {
+              t.members = cleanAndDeduplicateMembers(t.members || [], allStudents);
               tasksMap.set(t.id, t);
             }
           }
         }
       } else {
+        t.members = cleanAndDeduplicateMembers(t.members || [], allStudents);
         tasksMap.set(t.id, t);
       }
     }
   }
 
-  const result = syncTasksWithAutoPoints(Array.from(tasksMap.values()));
+  const rawTasks = Array.from(tasksMap.values()).map((t) => ({
+    ...t,
+    members: cleanAndDeduplicateMembers(t.members || [], allStudents),
+  }));
+  const result = syncTasksWithAutoPoints(rawTasks);
   saveLocalTasks(result);
   return result;
 }
@@ -803,12 +1045,10 @@ export async function addMemberToTask(
   const updated = tasks.map((t) => {
     if (t.id === taskId) {
       const currentMembers = t.members || [];
-      if (currentMembers.some((m) => m.userId === userId || m.fullName.toLowerCase() === fullName.toLowerCase())) {
-        return t;
-      }
+      const updatedMembers = cleanAndDeduplicateMembers([...currentMembers, newMember]);
       return {
         ...t,
-        members: [...currentMembers, newMember],
+        members: updatedMembers,
         updatedAt: new Date().toISOString(),
       };
     }
@@ -823,20 +1063,59 @@ export async function removeMemberFromTask(taskId: string, targetUserIdOrEmail: 
   const cleanTarget = targetUserIdOrEmail.trim().toLowerCase();
   const tasks = getLocalTasks();
   const targetTask = tasks.find((t) => t.id === taskId);
-  let memberEmailToRemove = cleanTarget.includes("@") ? cleanTarget : "";
 
-  if (targetTask && targetTask.members) {
-    const memberObj = targetTask.members.find(
-      (m) =>
-        m.userId.toLowerCase().trim() === cleanTarget ||
-        (m.fullName && m.fullName.toLowerCase().trim() === cleanTarget)
+  // Cari profil lengkap mahasiswa yang akan dikeluarkan (id UUID, email, nim, fullName)
+  let targetId = "";
+  let targetEmail = cleanTarget.includes("@") ? cleanTarget : "";
+  let targetNim = "";
+  let targetFullName = "";
+
+  let allStudents: UserProfile[] = [];
+  try {
+    allStudents = await fetchRegisteredStudents();
+  } catch {
+    allStudents = getAllRegisteredStudents();
+  }
+
+  const matchedStudent = allStudents.find((s) => {
+    if (s.id && s.id.toLowerCase() === cleanTarget) return true;
+    if (s.email && s.email.toLowerCase().trim() === cleanTarget) return true;
+    if (s.nim && (s.nim.toLowerCase().trim() === cleanTarget || cleanTarget.includes(s.nim.toLowerCase().trim()))) return true;
+    if (s.fullName && s.fullName.toLowerCase().trim() === cleanTarget) return true;
+    return false;
+  });
+
+  if (matchedStudent) {
+    targetId = matchedStudent.id ? matchedStudent.id.toLowerCase() : "";
+    targetEmail = matchedStudent.email ? matchedStudent.email.toLowerCase().trim() : targetEmail;
+    targetNim = matchedStudent.nim ? matchedStudent.nim.toLowerCase().trim() : "";
+    targetFullName = matchedStudent.fullName ? matchedStudent.fullName.toLowerCase().trim() : "";
+  } else if (targetTask?.members) {
+    const m = targetTask.members.find(
+      (mem) =>
+        mem.userId.toLowerCase().trim() === cleanTarget ||
+        (mem.fullName && mem.fullName.toLowerCase().trim() === cleanTarget)
     );
-    if (memberObj) {
-      if (memberObj.userId.includes("@")) {
-        memberEmailToRemove = memberObj.userId.toLowerCase().trim();
-      }
+    if (m) {
+      if (m.userId.includes("@")) targetEmail = m.userId.toLowerCase().trim();
+      else targetId = m.userId.toLowerCase();
+      targetFullName = m.fullName.toLowerCase().trim();
     }
   }
+
+  // Fungsi pencocokan anggota yang dikeluarkan (mencakup ID, email, NIM, nama lengkap, atau target)
+  const isTargetMember = (m: TaskMember) => {
+    const mUser = (m.userId || "").toLowerCase().trim();
+    const mName = (m.fullName || "").toLowerCase().trim();
+    const mEmail = ((m as any).email || "").toLowerCase().trim();
+
+    if (cleanTarget && (mUser === cleanTarget || mName === cleanTarget)) return true;
+    if (targetId && mUser === targetId) return true;
+    if (targetEmail && (mUser === targetEmail || mEmail === targetEmail)) return true;
+    if (targetNim && (mName === targetNim || mUser.includes(targetNim))) return true;
+    if (targetFullName && mName === targetFullName) return true;
+    return false;
+  };
 
   // 1. Sinkronkan ke Supabase Cloud Database secara realtime
   if (isSupabaseConfigured && supabase) {
@@ -850,12 +1129,7 @@ export async function removeMemberFromTask(taskId: string, targetUserIdOrEmail: 
         // Pastikan row base milik creator tetap ada jika row yang ada hanyalah row invitee
         const hasCreatorBaseRow = collabRows.some((r) => r.id === `task-base-${taskId}`);
         if (!hasCreatorBaseRow && targetTask) {
-          const cleanMembersForCreator = (targetTask.members || []).filter(
-            (m) =>
-              m.userId.toLowerCase().trim() !== cleanTarget &&
-              (!memberEmailToRemove || m.userId.toLowerCase().trim() !== memberEmailToRemove) &&
-              m.fullName.toLowerCase().trim() !== cleanTarget
-          );
+          const cleanMembersForCreator = (targetTask.members || []).filter((m) => !isTargetMember(m));
           await supabase.from("collaboration_invitations").upsert({
             id: `task-base-${taskId}`,
             task_id: taskId,
@@ -868,7 +1142,7 @@ export async function removeMemberFromTask(taskId: string, targetUserIdOrEmail: 
             invited_by: targetTask.createdBy,
             task_payload: {
               ...targetTask,
-              members: cleanMembersForCreator,
+              members: cleanAndDeduplicateMembers(cleanMembersForCreator, allStudents),
               updatedAt: new Date().toISOString(),
             },
           });
@@ -877,9 +1151,13 @@ export async function removeMemberFromTask(taskId: string, targetUserIdOrEmail: 
         for (const row of collabRows) {
           const rowEmail = (row.invited_email || "").toLowerCase().trim();
           const isTargetMemberRow =
+            row.id === cleanTarget ||
+            (targetEmail && rowEmail === targetEmail) ||
             rowEmail === cleanTarget ||
-            (memberEmailToRemove && rowEmail === memberEmailToRemove) ||
-            row.id === targetUserIdOrEmail;
+            (targetNim && (rowEmail.startsWith(targetNim + "@") || rowEmail.includes(targetNim))) ||
+            (row.task_payload?.members &&
+              row.task_payload.members.some((m: any) => isTargetMember(m)) &&
+              rowEmail !== (targetTask?.createdBy || "").toLowerCase().trim());
 
           if (isTargetMemberRow) {
             // Hapus baris undangan anggota yang dikeluarkan dari database cloud!
@@ -891,13 +1169,8 @@ export async function removeMemberFromTask(taskId: string, targetUserIdOrEmail: 
             // Perbarui task_payload di baris lain (misal baris pembuat atau anggota lain)
             const payload = row.task_payload as Task;
             const currentMembers = payload.members || [];
-            const filteredMembers = currentMembers.filter(
-              (m) =>
-                m.userId.toLowerCase().trim() !== cleanTarget &&
-                (!memberEmailToRemove || m.userId.toLowerCase().trim() !== memberEmailToRemove) &&
-                m.fullName.toLowerCase().trim() !== cleanTarget
-            );
-            payload.members = filteredMembers;
+            const filteredMembers = currentMembers.filter((m) => !isTargetMember(m));
+            payload.members = cleanAndDeduplicateMembers(filteredMembers, allStudents);
             payload.updatedAt = new Date().toISOString();
 
             await supabase
@@ -915,15 +1188,10 @@ export async function removeMemberFromTask(taskId: string, targetUserIdOrEmail: 
   // 2. Perbarui penyimpanan lokal pembuat tugas
   const updatedTasks = tasks.map((t) => {
     if (t.id === taskId) {
-      const filteredMembers = (t.members || []).filter(
-        (m) =>
-          m.userId.toLowerCase().trim() !== cleanTarget &&
-          (!memberEmailToRemove || m.userId.toLowerCase().trim() !== memberEmailToRemove) &&
-          m.fullName.toLowerCase().trim() !== cleanTarget
-      );
+      const filteredMembers = (t.members || []).filter((m) => !isTargetMember(m));
       return {
         ...t,
-        members: filteredMembers,
+        members: cleanAndDeduplicateMembers(filteredMembers, allStudents),
         updatedAt: new Date().toISOString(),
       };
     }
@@ -1199,31 +1467,39 @@ export async function acceptTaskInvitation(
     };
   }
 
-  // 2. Tambahkan currentUser sebagai anggota kelompok di taskToJoin
+  // 2. Tambahkan currentUser sebagai anggota kelompok di taskToJoin dengan nama asli lengkap
   if (taskToJoin) {
     const members = taskToJoin.members || [];
-    const alreadyMember = members.some(
-      (m) =>
-        m.userId === currentUser.id ||
-        (currentUser.email && m.userId?.toLowerCase().trim() === currentUser.email.toLowerCase().trim())
-    );
-    if (!alreadyMember) {
-      taskToJoin.members = [
-        ...members,
-        {
-          userId: currentUser.id,
-          taskId: taskToJoin.id,
-          fullName: currentUser.fullName,
-          avatarUrl: currentUser.avatarUrl,
-          role: "member",
-          joinedAt: new Date().toISOString(),
-        },
-      ];
-      taskToJoin.updatedAt = new Date().toISOString();
-    }
+    const cleanUserId = currentUser.id;
+    const cleanEmail = (currentUser.email || "").toLowerCase().trim();
+    const cleanNim = (currentUser.nim || "").toLowerCase().trim();
+    const cleanName = (currentUser.fullName || "").toLowerCase().trim();
+
+    // Singkirkan data placeholder atau duplikat lama untuk user ini
+    const filteredMembers = members.filter((m) => {
+      const mUser = (m.userId || "").toLowerCase().trim();
+      const mName = (m.fullName || "").toLowerCase().trim();
+      if (cleanUserId && mUser === cleanUserId.toLowerCase()) return false;
+      if (cleanEmail && mUser === cleanEmail) return false;
+      if (cleanNim && (mName === cleanNim || mUser.includes(cleanNim))) return false;
+      if (cleanName && mName === cleanName) return false;
+      return true;
+    });
+
+    const newMember: TaskMember = {
+      userId: currentUser.id,
+      taskId: taskToJoin.id,
+      fullName: currentUser.fullName,
+      avatarUrl: currentUser.avatarUrl,
+      role: "member",
+      joinedAt: new Date().toISOString(),
+    };
+
+    taskToJoin.members = cleanAndDeduplicateMembers([...filteredMembers, newMember]);
+    taskToJoin.updatedAt = new Date().toISOString();
   }
 
-  // 3. Update status undangan & task_payload di Supabase Cloud
+  // 3. Update status undangan & task_payload di Supabase Cloud untuk seluruh baris terkait tugas ini
   if (isSupabaseConfigured && supabase) {
     try {
       await supabase
@@ -1233,6 +1509,17 @@ export async function acceptTaskInvitation(
           task_payload: taskToJoin || undefined,
         })
         .eq("id", invitationId);
+
+      // PENTING: Perbarui juga baris dasar pembuat tugas (task-base-${taskToJoin.id})
+      // dan seluruh baris anggota lain agar nama anggota baru langsung tersinkronisasi tanpa duplikat!
+      if (taskToJoin) {
+        await supabase
+          .from("collaboration_invitations")
+          .update({
+            task_payload: taskToJoin,
+          })
+          .eq("task_id", taskToJoin.id);
+      }
     } catch (err) {
       console.warn("[INVITATIONS] Supabase update status note:", err);
     }

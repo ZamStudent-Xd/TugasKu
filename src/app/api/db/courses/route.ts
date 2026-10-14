@@ -1,6 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerDb, saveServerDb } from "@/lib/serverDb";
 import { Course } from "@/types";
+import { createClient } from "@supabase/supabase-js";
+
+function getSupabase() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!url || !key || url.includes("your-project") || key.includes("your-anon-key")) {
+    return null;
+  }
+  return createClient(url, key);
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -199,6 +209,13 @@ export async function DELETE(request: NextRequest) {
     let effectiveUserId = userId || "";
     let effectiveEmail = email ? email.toLowerCase().trim() : "";
 
+    const userProfile = db.profiles.find((p) =>
+      (effectiveUserId && p.id === effectiveUserId) ||
+      (effectiveEmail && p.email.toLowerCase().trim() === effectiveEmail)
+    );
+    const effectiveNim = userProfile?.nim?.toLowerCase().trim() || "";
+    const effectiveName = userProfile?.fullName?.toLowerCase().trim() || "";
+
     // Tangani tugas terkait mata kuliah ini:
     // 1. Tugas kolaborasi milik ketua lain di mana user ini adalah anggota:
     //    Tugas kolaborasi TETAP ADA di ketua kelompok, tetapi keanggotaan user ini otomatis dilepaskan (dihapus dari task.members).
@@ -226,9 +243,12 @@ export async function DELETE(request: NextRequest) {
         // Otomatis terlepas kolaborasi tersebut: hapus user dari task.members
         if (t.members) {
           t.members = t.members.filter((m) => {
-            if (effectiveUserId && m.userId && m.userId.toLowerCase().trim() === effectiveUserId.toLowerCase().trim()) return false;
-            if (effectiveEmail && m.userId && m.userId.toLowerCase().trim() === effectiveEmail) return false;
-            if (effectiveEmail && m.email && m.email.toLowerCase().trim() === effectiveEmail) return false;
+            const mUser = (m.userId || "").toLowerCase().trim();
+            const mName = (m.fullName || "").toLowerCase().trim();
+            if (effectiveUserId && mUser === effectiveUserId.toLowerCase().trim()) return false;
+            if (effectiveEmail && (mUser === effectiveEmail || (m as any).email === effectiveEmail)) return false;
+            if (effectiveNim && (mName === effectiveNim || mUser.includes(effectiveNim))) return false;
+            if (effectiveName && mName === effectiveName) return false;
             return true;
           });
           t.updatedAt = new Date().toISOString();
@@ -252,6 +272,61 @@ export async function DELETE(request: NextRequest) {
         }
         return inv;
       });
+    }
+
+    // Sinkronkan ke Supabase Cloud jika terkonfigurasi
+    const supabase = getSupabase();
+    if (supabase) {
+      try {
+        let courseDelQuery = supabase.from("courses").delete().eq("id", courseId);
+        if (effectiveUserId) {
+          courseDelQuery = courseDelQuery.eq("owner_id", effectiveUserId);
+        }
+        await courseDelQuery;
+
+        if (effectiveEmail || effectiveUserId) {
+          const { data: collabRows } = await supabase
+            .from("collaboration_invitations")
+            .select("*");
+
+          if (Array.isArray(collabRows)) {
+            for (const row of collabRows) {
+              const rowCourse = (row.course_name || row.task_payload?.courseName || "").toLowerCase().trim();
+              const isMatchCourse =
+                (targetCourseName && rowCourse === targetCourseName) ||
+                row.task_payload?.courseId === courseId;
+
+              if (isMatchCourse) {
+                const rowEmail = (row.invited_email || "").toLowerCase().trim();
+                const isTargetRow =
+                  (effectiveEmail && rowEmail === effectiveEmail) ||
+                  (effectiveNim && (rowEmail.startsWith(effectiveNim + "@") || rowEmail.includes(effectiveNim)));
+
+                if (isTargetRow) {
+                  await supabase.from("collaboration_invitations").delete().eq("id", row.id);
+                } else if (row.task_payload) {
+                  const payload = row.task_payload as any;
+                  const currentMembers = payload.members || [];
+                  const filtered = currentMembers.filter((m: any) => {
+                    const mUser = (m.userId || "").toLowerCase().trim();
+                    const mName = (m.fullName || "").toLowerCase().trim();
+                    if (effectiveUserId && mUser === effectiveUserId.toLowerCase().trim()) return false;
+                    if (effectiveEmail && (mUser === effectiveEmail || m.email === effectiveEmail)) return false;
+                    if (effectiveNim && (mName === effectiveNim || mUser.includes(effectiveNim))) return false;
+                    if (effectiveName && mName === effectiveName) return false;
+                    return true;
+                  });
+                  payload.members = filtered;
+                  payload.updatedAt = new Date().toISOString();
+                  await supabase.from("collaboration_invitations").update({ task_payload: payload }).eq("id", row.id);
+                }
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("[API COURSES DELETE] Supabase sync note:", err);
+      }
     }
 
     saveServerDb(db);

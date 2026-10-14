@@ -416,6 +416,7 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
         setCourses(cData);
         setTasks(tData);
         setInvitations(iData);
+        setInvitingTask((prev) => (prev ? tData.find((t) => t.id === prev.id) || null : null));
       } catch {
         // silent background error
       }
