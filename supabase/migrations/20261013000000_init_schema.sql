@@ -137,24 +137,24 @@ ALTER TABLE public.tasks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.task_members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.task_invitations ENABLE ROW LEVEL SECURITY;
 
--- PROFILES RLS
+-- PROFILES RLS (Dapat diakses untuk cek akun dan pencarian kolaborasi rekan mahasiswa)
 DROP POLICY IF EXISTS "Profiles viewable by authenticated users" ON public.profiles;
-CREATE POLICY "Profiles viewable by authenticated users"
+DROP POLICY IF EXISTS "Profiles viewable by all" ON public.profiles;
+CREATE POLICY "Profiles viewable by all"
   ON public.profiles FOR SELECT
-  TO authenticated
   USING (true);
 
 DROP POLICY IF EXISTS "Users can update own profile" ON public.profiles;
-CREATE POLICY "Users can update own profile"
+DROP POLICY IF EXISTS "Profiles updateable by all" ON public.profiles;
+CREATE POLICY "Profiles updateable by all"
   ON public.profiles FOR UPDATE
-  TO authenticated
-  USING (auth.uid() = id);
+  USING (true);
 
 DROP POLICY IF EXISTS "Users can insert own profile" ON public.profiles;
-CREATE POLICY "Users can insert own profile"
+DROP POLICY IF EXISTS "Profiles insertable by all" ON public.profiles;
+CREATE POLICY "Profiles insertable by all"
   ON public.profiles FOR INSERT
-  TO authenticated
-  WITH CHECK (auth.uid() = id);
+  WITH CHECK (true);
 
 -- COURSES RLS
 DROP POLICY IF EXISTS "Users can view own courses" ON public.courses;
