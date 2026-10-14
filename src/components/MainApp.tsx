@@ -437,7 +437,7 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
       try {
         realtimeChannel = supabase
           .channel("tugasku-realtime")
-          .on("postgres_changes", { event: "*", schema: "public", table: "invitations" }, () => syncRealtime())
+          .on("postgres_changes", { event: "*", schema: "public", table: "collaboration_invitations" }, () => syncRealtime())
           .on("postgres_changes", { event: "*", schema: "public", table: "tasks" }, () => syncRealtime())
           .subscribe();
       } catch {}
