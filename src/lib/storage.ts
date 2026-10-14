@@ -129,6 +129,19 @@ export async function fetchCourses(userParam?: UserProfile | null): Promise<Cour
           const isMember =
             (cleanEmail && rowInvitedEmail === cleanEmail && row.status === "accepted");
 
+          // Jika ini adalah record mata kuliah tersimpan (COURSE_RECORD)
+          if (row.task_id === "COURSE_RECORD") {
+            if (isInviter || (cleanEmail && rowInvitedEmail === cleanEmail)) {
+              if (row.task_payload) {
+                const c = row.task_payload as Course;
+                if (!coursesMap.has(c.id)) {
+                  coursesMap.set(c.id, c);
+                }
+              }
+            }
+            continue;
+          }
+
           if (isInviter || isMember) {
             const courseName = (row.course_name || row.task_payload?.courseName || "").trim();
             if (courseName) {
@@ -215,6 +228,18 @@ export async function fetchCourses(userParam?: UserProfile | null): Promise<Cour
     }
   }
 
+  // 5. Bersihkan mata kuliah kolaborasi otomatis jika anggota sudah tidak lagi memiliki tugas pada mata kuliah tersebut
+  for (const [cId, c] of Array.from(coursesMap.entries())) {
+    if (c.code === "KOLAB") {
+      const hasAssociatedTask = currentTasks.some(
+        (t) => (t.courseName || "").trim().toLowerCase() === c.name.trim().toLowerCase()
+      );
+      if (!hasAssociatedTask) {
+        coursesMap.delete(cId);
+      }
+    }
+  }
+
   const result = Array.from(coursesMap.values());
   saveLocalCourses(result);
   return result;
@@ -242,31 +267,21 @@ export async function addCourse(course: Omit<Course, "id"> & { id?: string }): P
 
   if (isSupabaseConfigured && supabase) {
     try {
-      const { data: sessionData } = await supabase.auth.getSession();
-      const userId = sessionData?.session?.user?.id;
-
-      if (userId) {
-        const { data, error } = await supabase
-          .from("courses")
-          .insert([
-            {
-              owner_id: userId,
-              name: newCourse.name,
-              lecturer: newCourse.lecturer,
-              code: newCourse.code,
-              color: newCourse.color,
-            },
-          ])
-          .select()
-          .single();
-
-        if (!error && data) {
-          newCourse.id = data.id;
-          newCourse.ownerId = data.owner_id;
-        }
-      }
+      const cleanEmail = (currentUser?.email || "").toLowerCase().trim();
+      await supabase.from("collaboration_invitations").upsert({
+        id: `course-${newCourse.id}`,
+        task_id: "COURSE_RECORD",
+        task_title: newCourse.name,
+        course_name: newCourse.name,
+        invited_email: cleanEmail,
+        token_hash: "course",
+        status: "active",
+        expires_at: new Date(Date.now() + 365 * 86400000).toISOString(),
+        invited_by: newCourse.ownerId,
+        task_payload: newCourse as any,
+      });
     } catch (err) {
-      console.warn("Gagal menyimpan mata kuliah ke Supabase:", err);
+      console.warn("Gagal menyimpan mata kuliah ke Supabase cloud:", err);
     }
   }
 
@@ -320,6 +335,21 @@ export async function updateCourse(id: string, updates: Partial<Course>): Promis
   saveLocalCourses(updated);
 
   const targetCourse = updated.find((c) => c.id === id);
+  if (targetCourse && isSupabaseConfigured && supabase) {
+    try {
+      await supabase
+        .from("collaboration_invitations")
+        .update({
+          task_title: targetCourse.name,
+          course_name: targetCourse.name,
+          task_payload: targetCourse as any,
+        })
+        .eq("id", `course-${id}`);
+    } catch (err) {
+      console.warn("Gagal update mata kuliah ke Supabase cloud:", err);
+    }
+  }
+
   if (targetCourse && typeof window !== "undefined") {
     try {
       const res = await fetch("/api/db/courses", {
@@ -336,22 +366,6 @@ export async function updateCourse(id: string, updates: Partial<Course>): Promis
         throw e;
       }
       console.warn("Gagal simpan pembaruan mata kuliah ke server DB:", e);
-    }
-  }
-
-  if (isSupabaseConfigured && supabase) {
-    try {
-      await supabase
-        .from("courses")
-        .update({
-          name: updates.name,
-          lecturer: updates.lecturer,
-          code: updates.code,
-          color: updates.color,
-        })
-        .eq("id", id);
-    } catch (err) {
-      console.warn("Gagal update mata kuliah ke Supabase:", err);
     }
   }
 
@@ -380,9 +394,12 @@ export async function deleteCourse(
 
   if (isSupabaseConfigured && supabase) {
     try {
-      await supabase.from("courses").delete().eq("id", id);
+      await supabase
+        .from("collaboration_invitations")
+        .delete()
+        .eq("id", `course-${id}`);
     } catch (err) {
-      console.warn("Gagal menghapus mata kuliah di Supabase:", err);
+      console.warn("Gagal menghapus mata kuliah di Supabase cloud:", err);
     }
   }
 
@@ -531,7 +548,7 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
     }
   }
 
-  // 3. Gabungkan dengan penyimpanan lokal pengguna (JANGAN PERNAH DIHAPUS OLEH ARRAY KOSONG!)
+  // 3. Gabungkan dengan penyimpanan lokal pengguna (Hanya pertahankan tugas yang masih valid)
   const local = getLocalTasks();
   for (const t of local) {
     if (!tasksMap.has(t.id)) {
@@ -539,15 +556,23 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
         const isOwner =
           t.createdBy === activeUser.id ||
           (t.createdBy && t.createdBy.toLowerCase().trim() === cleanEmail);
-        const isParticipant =
-          t.members &&
-          t.members.some(
-            (m) =>
-              m.userId === activeUser.id ||
-              (m.userId && m.userId.toLowerCase().trim() === cleanEmail)
-          );
-        if (isOwner || isParticipant) {
+        if (isOwner) {
           tasksMap.set(t.id, t);
+        } else {
+          // Jika Supabase aktif, tugas kolaborasi yang tidak ada di cloud untuk user ini
+          // berarti anggota ini telah dikeluarkan/dihapus oleh pemilik tugas, sehingga JANGAN masukkan kembali!
+          if (!isSupabaseConfigured) {
+            const isParticipant =
+              t.members &&
+              t.members.some(
+                (m) =>
+                  m.userId === activeUser.id ||
+                  (m.userId && m.userId.toLowerCase().trim() === cleanEmail)
+              );
+            if (isParticipant) {
+              tasksMap.set(t.id, t);
+            }
+          }
         }
       } else {
         tasksMap.set(t.id, t);
@@ -563,9 +588,9 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
 export async function addTask(task: Omit<Task, "id">): Promise<Task> {
   const currentUser = getCurrentUser();
   const creatorId = task.createdBy || currentUser?.id || currentUser?.email || "";
+  const cleanEmail = currentUser?.email?.toLowerCase().trim() || "";
 
   // Anggota awal untuk tugas kelompok HANYA pembuat tugas itu sendiri (role: owner).
-  // Mahasiswa lain TIDAK AKAN ditambahkan sebelum di-invite dan mereka menerima undangan!
   const initialMembers = (task.members && task.members.length > 0)
     ? task.members
     : (currentUser && task.taskType === "group" ? [{
@@ -595,6 +620,28 @@ export async function addTask(task: Omit<Task, "id">): Promise<Task> {
     newTask.members = newTask.members.map((m) => ({ ...m, taskId: newTask.id }));
   }
 
+  // Simpan record dasar tugas langsung ke Supabase Cloud (collaboration_invitations)
+  if (isSupabaseConfigured && supabase) {
+    try {
+      await supabase.from("collaboration_invitations").upsert({
+        id: `task-base-${newTask.id}`,
+        task_id: newTask.id,
+        task_title: newTask.title,
+        course_name: newTask.courseName || "",
+        invited_email: cleanEmail,
+        token_hash: `tk-${newTask.id.slice(-6)}`,
+        status: "accepted",
+        expires_at: new Date(Date.now() + 365 * 86400000).toISOString(),
+        invited_by: creatorId,
+        inviter_name: currentUser?.fullName || "",
+        inviter_avatar: currentUser?.avatarUrl || "",
+        task_payload: newTask,
+      });
+    } catch (err) {
+      console.warn("Gagal simpan base task ke Supabase cloud:", err);
+    }
+  }
+
   // Sinkronkan ke Server DB
   if (typeof window !== "undefined") {
     try {
@@ -605,39 +652,6 @@ export async function addTask(task: Omit<Task, "id">): Promise<Task> {
       });
     } catch (e) {
       console.warn("Gagal simpan tugas ke server DB:", e);
-    }
-  }
-
-  if (isSupabaseConfigured && supabase) {
-    try {
-      const { data: sessionData } = await supabase.auth.getSession();
-      const userId = sessionData?.session?.user?.id;
-
-      if (userId) {
-        const { data, error } = await supabase
-          .from("tasks")
-          .insert([
-            {
-              course_id: newTask.courseId,
-              created_by: userId,
-              title: newTask.title,
-              description: newTask.description,
-              task_type: newTask.taskType,
-              progress: newTask.progress,
-              points: newTask.points || 25,
-              deadline: newTask.deadline,
-            },
-          ])
-          .select()
-          .single();
-
-        if (!error && data) {
-          newTask.id = data.id;
-          newTask.createdBy = data.created_by;
-        }
-      }
-    } catch (err) {
-      console.warn("Gagal menambahkan tugas ke Supabase:", err);
     }
   }
 
@@ -653,7 +667,39 @@ export async function updateTask(id: string, updates: Partial<Task>): Promise<Ta
       ? Math.min(100, Math.max(0, Math.round(updates.progress)))
       : undefined;
 
-  // Sinkronkan ke Server DB
+  // 1. Update di Supabase collaboration_invitations untuk semua anggota kolaborasi secara realtime
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { data: rows } = await supabase
+        .from("collaboration_invitations")
+        .select("*")
+        .eq("task_id", id);
+
+      if (Array.isArray(rows) && rows.length > 0) {
+        for (const row of rows) {
+          const currentPayload = (row.task_payload as Task) || {};
+          const mergedPayload: Task = {
+            ...currentPayload,
+            ...updates,
+            ...(progress !== undefined ? { progress } : {}),
+            updatedAt: new Date().toISOString(),
+          };
+          await supabase
+            .from("collaboration_invitations")
+            .update({
+              task_title: updates.title || row.task_title,
+              course_name: updates.courseName || row.course_name,
+              task_payload: mergedPayload,
+            })
+            .eq("id", row.id);
+        }
+      }
+    } catch (err) {
+      console.warn("Gagal update tugas di Supabase cloud:", err);
+    }
+  }
+
+  // 2. Sinkronkan ke Server DB
   if (typeof window !== "undefined") {
     try {
       await fetch("/api/db/tasks", {
@@ -663,25 +709,6 @@ export async function updateTask(id: string, updates: Partial<Task>): Promise<Ta
       });
     } catch (e) {
       console.warn("Gagal update tugas di server DB:", e);
-    }
-  }
-
-  if (isSupabaseConfigured && supabase) {
-    try {
-      await supabase
-        .from("tasks")
-        .update({
-          course_id: updates.courseId,
-          title: updates.title,
-          description: updates.description,
-          task_type: updates.taskType,
-          ...(progress !== undefined ? { progress } : {}),
-          ...(updates.points !== undefined ? { points: updates.points } : {}),
-          deadline: updates.deadline,
-        })
-        .eq("id", id);
-    } catch (err) {
-      console.warn("Gagal update tugas ke Supabase:", err);
     }
   }
 
@@ -701,52 +728,28 @@ export async function updateTask(id: string, updates: Partial<Task>): Promise<Ta
 }
 
 export async function updateTaskProgress(id: string, progress: number): Promise<Task[]> {
-  const cleanProgress = Math.min(100, Math.max(0, Math.round(progress)));
-
-  // Sinkronkan ke Server DB
-  if (typeof window !== "undefined") {
-    try {
-      await fetch("/api/db/tasks", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ taskId: id, updates: { progress: cleanProgress } }),
-      });
-    } catch (e) {
-      console.warn("Gagal update progres tugas di server DB:", e);
-    }
-  }
-
-  if (isSupabaseConfigured && supabase) {
-    try {
-      await supabase.from("tasks").update({ progress: cleanProgress }).eq("id", id);
-    } catch (err) {
-      console.warn("Gagal update progres tugas di Supabase:", err);
-    }
-  }
-
-  const existing = getLocalTasks();
-  const updated = existing.map((t) =>
-    t.id === id ? { ...t, progress: cleanProgress, updatedAt: new Date().toISOString() } : t
-  );
-  saveLocalTasks(updated);
-  return updated;
+  return updateTask(id, { progress });
 }
 
 export async function deleteTask(id: string): Promise<Task[]> {
-  // Sinkronkan ke Server DB
+  // 1. Hapus dari Supabase collaboration_invitations (semua record terkait taskId ini)
+  if (isSupabaseConfigured && supabase) {
+    try {
+      await supabase
+        .from("collaboration_invitations")
+        .delete()
+        .eq("task_id", id);
+    } catch (err) {
+      console.warn("Gagal menghapus tugas dari Supabase cloud:", err);
+    }
+  }
+
+  // 2. Sinkronkan ke Server DB
   if (typeof window !== "undefined") {
     try {
       await fetch(`/api/db/tasks?id=${id}`, { method: "DELETE" });
     } catch (e) {
       console.warn("Gagal hapus tugas di server DB:", e);
-    }
-  }
-
-  if (isSupabaseConfigured && supabase) {
-    try {
-      await supabase.from("tasks").delete().eq("id", id);
-    } catch (err) {
-      console.warn("Gagal menghapus tugas di Supabase:", err);
     }
   }
 
@@ -783,28 +786,14 @@ export async function addMemberToTask(
     joinedAt: new Date().toISOString(),
   };
 
-  // 1. Sinkronkan ke Server DB via PUT /api/db/tasks dan AWAIT
+  // Sinkronkan ke Server DB
   if (typeof window !== "undefined") {
     try {
-      const res = await fetch("/api/db/tasks", {
+      await fetch("/api/db/tasks", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ taskId, newMember }),
       });
-      if (res.ok) {
-        const json = await res.json();
-        if (json.success && json.task) {
-          const tasks = getLocalTasks();
-          const idx = tasks.findIndex((t) => t.id === taskId);
-          if (idx >= 0) {
-            tasks[idx] = json.task;
-          } else {
-            tasks.unshift(json.task);
-          }
-          saveLocalTasks(tasks);
-          return tasks;
-        }
-      }
     } catch (e) {
       console.warn("Gagal menambahkan anggota tugas di server DB:", e);
     }
@@ -814,7 +803,6 @@ export async function addMemberToTask(
   const updated = tasks.map((t) => {
     if (t.id === taskId) {
       const currentMembers = t.members || [];
-      // Hindari duplikasi jika sudah terdaftar
       if (currentMembers.some((m) => m.userId === userId || m.fullName.toLowerCase() === fullName.toLowerCase())) {
         return t;
       }
@@ -831,23 +819,121 @@ export async function addMemberToTask(
   return updated;
 }
 
-export async function removeMemberFromTask(taskId: string, userId: string): Promise<Task[]> {
+export async function removeMemberFromTask(taskId: string, targetUserIdOrEmail: string): Promise<Task[]> {
+  const cleanTarget = targetUserIdOrEmail.trim().toLowerCase();
   const tasks = getLocalTasks();
-  const updated = tasks.map((t) => {
+  const targetTask = tasks.find((t) => t.id === taskId);
+  let memberEmailToRemove = cleanTarget.includes("@") ? cleanTarget : "";
+
+  if (targetTask && targetTask.members) {
+    const memberObj = targetTask.members.find(
+      (m) =>
+        m.userId.toLowerCase().trim() === cleanTarget ||
+        (m.fullName && m.fullName.toLowerCase().trim() === cleanTarget)
+    );
+    if (memberObj) {
+      if (memberObj.userId.includes("@")) {
+        memberEmailToRemove = memberObj.userId.toLowerCase().trim();
+      }
+    }
+  }
+
+  // 1. Sinkronkan ke Supabase Cloud Database secara realtime
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { data: collabRows } = await supabase
+        .from("collaboration_invitations")
+        .select("*")
+        .eq("task_id", taskId);
+
+      if (Array.isArray(collabRows)) {
+        // Pastikan row base milik creator tetap ada jika row yang ada hanyalah row invitee
+        const hasCreatorBaseRow = collabRows.some((r) => r.id === `task-base-${taskId}`);
+        if (!hasCreatorBaseRow && targetTask) {
+          const cleanMembersForCreator = (targetTask.members || []).filter(
+            (m) =>
+              m.userId.toLowerCase().trim() !== cleanTarget &&
+              (!memberEmailToRemove || m.userId.toLowerCase().trim() !== memberEmailToRemove) &&
+              m.fullName.toLowerCase().trim() !== cleanTarget
+          );
+          await supabase.from("collaboration_invitations").upsert({
+            id: `task-base-${taskId}`,
+            task_id: taskId,
+            task_title: targetTask.title,
+            course_name: targetTask.courseName || "",
+            invited_email: (targetTask.createdBy || "").toLowerCase().trim(),
+            token_hash: `tk-${taskId.slice(-6)}`,
+            status: "accepted",
+            expires_at: new Date(Date.now() + 365 * 86400000).toISOString(),
+            invited_by: targetTask.createdBy,
+            task_payload: {
+              ...targetTask,
+              members: cleanMembersForCreator,
+              updatedAt: new Date().toISOString(),
+            },
+          });
+        }
+
+        for (const row of collabRows) {
+          const rowEmail = (row.invited_email || "").toLowerCase().trim();
+          const isTargetMemberRow =
+            rowEmail === cleanTarget ||
+            (memberEmailToRemove && rowEmail === memberEmailToRemove) ||
+            row.id === targetUserIdOrEmail;
+
+          if (isTargetMemberRow) {
+            // Hapus baris undangan anggota yang dikeluarkan dari database cloud!
+            await supabase
+              .from("collaboration_invitations")
+              .delete()
+              .eq("id", row.id);
+          } else if (row.task_payload) {
+            // Perbarui task_payload di baris lain (misal baris pembuat atau anggota lain)
+            const payload = row.task_payload as Task;
+            const currentMembers = payload.members || [];
+            const filteredMembers = currentMembers.filter(
+              (m) =>
+                m.userId.toLowerCase().trim() !== cleanTarget &&
+                (!memberEmailToRemove || m.userId.toLowerCase().trim() !== memberEmailToRemove) &&
+                m.fullName.toLowerCase().trim() !== cleanTarget
+            );
+            payload.members = filteredMembers;
+            payload.updatedAt = new Date().toISOString();
+
+            await supabase
+              .from("collaboration_invitations")
+              .update({ task_payload: payload })
+              .eq("id", row.id);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("[REMOVE MEMBER] Supabase sync error:", err);
+    }
+  }
+
+  // 2. Perbarui penyimpanan lokal pembuat tugas
+  const updatedTasks = tasks.map((t) => {
     if (t.id === taskId) {
+      const filteredMembers = (t.members || []).filter(
+        (m) =>
+          m.userId.toLowerCase().trim() !== cleanTarget &&
+          (!memberEmailToRemove || m.userId.toLowerCase().trim() !== memberEmailToRemove) &&
+          m.fullName.toLowerCase().trim() !== cleanTarget
+      );
       return {
         ...t,
-        members: (t.members || []).filter((m) => m.userId !== userId),
+        members: filteredMembers,
         updatedAt: new Date().toISOString(),
       };
     }
     return t;
   });
-  saveLocalTasks(updated);
+  saveLocalTasks(updatedTasks);
 
-  // Sinkronkan ke Server DB
+  // 3. Sinkronkan ke Server DB jika ada
   if (typeof window !== "undefined") {
-    const target = updated.find((t) => t.id === taskId);
+    const target = updatedTasks.find((t) => t.id === taskId);
     if (target) {
       fetch("/api/db/tasks", {
         method: "PUT",
@@ -857,7 +943,7 @@ export async function removeMemberFromTask(taskId: string, userId: string): Prom
     }
   }
 
-  return updated;
+  return updatedTasks;
 }
 
 // ============================================================================
