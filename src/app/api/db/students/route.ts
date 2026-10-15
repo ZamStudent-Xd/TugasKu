@@ -26,37 +26,9 @@ export async function GET(request: NextRequest) {
     // 1. Ambil dari Supabase PostgreSQL Cloud
     const supabase = getSupabase();
     if (supabase) {
-      // 1.1 Ambil dari PROFILE_RECORD di collaboration_invitations (prioritas avatar paling aktual & realtime)
-      try {
-        const { data: profileRecords } = await supabase
-          .from("collaboration_invitations")
-          .select("*")
-          .eq("task_id", "PROFILE_RECORD");
+      const activeEmailsInProfiles = new Set<string>();
 
-        if (Array.isArray(profileRecords)) {
-          for (const row of profileRecords) {
-            const clean = row.invited_email?.toLowerCase().trim();
-            if (clean && row.task_payload) {
-              const p = row.task_payload as UserProfile;
-              studentsMap.set(clean, {
-                id: p.id || row.invited_by || `user-${clean}`,
-                fullName: p.fullName || row.inviter_name || clean.split("@")[0],
-                email: clean,
-                nim: p.nim || "",
-                major: p.major || "Teknologi Informasi",
-                semester: p.semester || 1,
-                campus: p.campus || "Universitas BSI (Bina Sarana Informatika)",
-                avatarUrl: p.avatarUrl || row.inviter_avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${p.nim || clean}`,
-                createdAt: p.createdAt || row.created_at,
-              });
-            }
-          }
-        }
-      } catch (err) {
-        console.warn("[API STUDENTS] PROFILE_RECORD query error:", err);
-      }
-
-      // 1.2 Ambil dari Supabase Profiles table untuk melengkapi mahasiswa yang belum memperbarui profil
+      // 1.1 Ambil akun sah dari tabel profiles Supabase (Single Source of Truth)
       try {
         let supaQuery = supabase.from("profiles").select("*");
         if (query) {
@@ -69,7 +41,8 @@ export async function GET(request: NextRequest) {
         if (!error && Array.isArray(data)) {
           for (const row of data) {
             const clean = row.email?.toLowerCase().trim();
-            if (clean && !studentsMap.has(clean)) {
+            if (clean) {
+              activeEmailsInProfiles.add(clean);
               studentsMap.set(clean, {
                 id: row.id,
                 fullName: row.full_name,
@@ -87,19 +60,48 @@ export async function GET(request: NextRequest) {
       } catch (err) {
         console.warn("[API STUDENTS] Supabase profiles query error:", err);
       }
-    }
 
-    // 2. Ambil dari Server Database lokal (sebagai fallback/cadangan)
-    try {
-      const localStudents = query ? searchRegisteredStudentsFromDb(query) : getAllStudentsFromDb();
-      for (const s of localStudents) {
-        const key = s.email.toLowerCase().trim();
-        if (!studentsMap.has(key)) {
-          studentsMap.set(key, s);
+      // 1.2 Sinkronkan foto avatar realtime dari PROFILE_RECORD HANYA untuk akun yang masih ada di profiles
+      // Jika akun sudah dihapus dari profiles, bersihkan PROFILE_RECORD yatim dari database!
+      try {
+        const { data: profileRecords } = await supabase
+          .from("collaboration_invitations")
+          .select("*")
+          .eq("task_id", "PROFILE_RECORD");
+
+        if (Array.isArray(profileRecords)) {
+          for (const row of profileRecords) {
+            const clean = row.invited_email?.toLowerCase().trim();
+            if (clean) {
+              if (activeEmailsInProfiles.has(clean)) {
+                const existing = studentsMap.get(clean);
+                if (existing) {
+                  const updatedAvatar = row.inviter_avatar || (row.task_payload as any)?.avatarUrl;
+                  if (updatedAvatar) existing.avatarUrl = updatedAvatar;
+                }
+              } else {
+                // Akun sudah dihapus dari database! Hapus PROFILE_RECORD yatim ini
+                await supabase.from("collaboration_invitations").delete().eq("id", row.id);
+              }
+            }
+          }
         }
+      } catch (err) {
+        console.warn("[API STUDENTS] PROFILE_RECORD sync/clean error:", err);
       }
-    } catch {
-      // ignore
+    } else {
+      // 2. Ambil dari Server Database lokal HANYA jika Supabase tidak terkonfigurasi (offline mode)
+      try {
+        const localStudents = query ? searchRegisteredStudentsFromDb(query) : getAllStudentsFromDb();
+        for (const s of localStudents) {
+          const key = s.email.toLowerCase().trim();
+          if (!studentsMap.has(key)) {
+            studentsMap.set(key, s);
+          }
+        }
+      } catch {
+        // ignore
+      }
     }
 
     let results = Array.from(studentsMap.values());

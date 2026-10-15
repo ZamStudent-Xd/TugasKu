@@ -61,6 +61,7 @@ import {
   getAllRegisteredStudents,
   checkIsTaskOwner,
   syncUserProfileToCloud,
+  verifyUserAccountExists,
 } from "@/lib/storage";
 import { isSupabaseConfigured, supabase } from "@/lib/supabaseClient";
 
@@ -299,6 +300,28 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
           }
         }
       )
+      .on(
+        "postgres_changes",
+        {
+          event: "DELETE",
+          schema: "public",
+          table: "profiles",
+        },
+        async (payload: any) => {
+          const oldEmail = payload.old?.email?.toLowerCase().trim();
+          const oldId = payload.old?.id;
+          if (
+            (oldEmail && oldEmail === cleanEmail) ||
+            (oldId && user.id && oldId === user.id)
+          ) {
+            await logoutStudent();
+            setUser(null);
+            if (typeof window !== "undefined") {
+              window.location.replace("/login");
+            }
+          }
+        }
+      )
       .subscribe();
 
     return () => {
@@ -396,6 +419,19 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
 
     const syncRealtime = async () => {
       try {
+        // Verifikasi realtime apakah akun pengguna masih terdaftar di database
+        if (user?.email) {
+          const isStillValid = await verifyUserAccountExists(user.email);
+          if (!isStillValid) {
+            await logoutStudent();
+            setUser(null);
+            if (typeof window !== "undefined") {
+              window.location.replace("/login");
+            }
+            return;
+          }
+        }
+
         const [cData, tData, iData] = await Promise.all([
           fetchCourses(user),
           fetchTasks(user),

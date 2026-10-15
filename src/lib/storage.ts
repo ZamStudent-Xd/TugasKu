@@ -2106,41 +2106,10 @@ export async function fetchRegisteredStudents(query?: string): Promise<UserProfi
   const list: UserProfile[] = [];
   const seenEmails = new Set<string>();
 
-  // 1. Ambil dari Supabase PROFILE_RECORD langsung jika terkonfigurasi (PRIORITAS 1: Avatar paling update & realtime)
+  // 1. Ambil dari Supabase PostgreSQL Cloud (Single Source of Truth)
   if (isSupabaseConfigured && supabase) {
-    try {
-      const { data: profileRecords, error } = await supabase
-        .from("collaboration_invitations")
-        .select("*")
-        .eq("task_id", "PROFILE_RECORD");
+    const activeEmailsInProfiles = new Set<string>();
 
-      if (!error && Array.isArray(profileRecords)) {
-        for (const row of profileRecords) {
-          const clean = row.invited_email?.toLowerCase().trim();
-          if (clean && !seenEmails.has(clean)) {
-            const p = (row.task_payload as UserProfile) || {};
-            list.push({
-              id: p.id || row.invited_by || `user-${clean}`,
-              fullName: p.fullName || row.inviter_name || row.task_title || clean.split("@")[0],
-              email: clean,
-              nim: p.nim || "",
-              major: p.major || "Teknologi Informasi",
-              semester: p.semester || 1,
-              campus: p.campus || "Universitas BSI (Bina Sarana Informatika)",
-              avatarUrl: p.avatarUrl || row.inviter_avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${clean}`,
-              createdAt: p.createdAt || row.created_at,
-            });
-            seenEmails.add(clean);
-          }
-        }
-      }
-    } catch (err) {
-      console.warn("[STORAGE] Supabase PROFILE_RECORD fetch note:", err);
-    }
-  }
-
-  // 1.2 Ambil dari Supabase Profiles langsung untuk mahasiswa yang belum memiliki PROFILE_RECORD
-  if (isSupabaseConfigured && supabase) {
     try {
       let supaQuery = supabase.from("profiles").select("*");
       if (query && query.trim()) {
@@ -2152,6 +2121,7 @@ export async function fetchRegisteredStudents(query?: string): Promise<UserProfi
         for (const row of data) {
           const clean = row.email?.toLowerCase().trim();
           if (clean && !seenEmails.has(clean)) {
+            activeEmailsInProfiles.add(clean);
             list.push({
               id: row.id,
               fullName: row.full_name,
@@ -2170,9 +2140,48 @@ export async function fetchRegisteredStudents(query?: string): Promise<UserProfi
     } catch (err) {
       console.warn("Supabase profiles fetch note:", err);
     }
+
+    // 1.2 Sinkronkan foto avatar realtime dari PROFILE_RECORD HANYA untuk akun yang masih ada di profiles
+    try {
+      const { data: profileRecords, error } = await supabase
+        .from("collaboration_invitations")
+        .select("*")
+        .eq("task_id", "PROFILE_RECORD");
+
+      if (!error && Array.isArray(profileRecords)) {
+        for (const row of profileRecords) {
+          const clean = row.invited_email?.toLowerCase().trim();
+          if (clean) {
+            if (activeEmailsInProfiles.has(clean)) {
+              const item = list.find((s) => s.email.toLowerCase().trim() === clean);
+              if (item) {
+                const updatedAvatar = row.inviter_avatar || (row.task_payload as any)?.avatarUrl;
+                if (updatedAvatar) item.avatarUrl = updatedAvatar;
+              }
+            } else {
+              // Hapus PROFILE_RECORD yatim jika akun sudah dihapus dari database
+              supabase.from("collaboration_invitations").delete().eq("id", row.id).then(() => {});
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("[STORAGE] PROFILE_RECORD sync note:", err);
+    }
+
+    // Bersihkan cache lokal dari akun-akun yang telah dihapus di Supabase
+    const localAccounts = getRegisteredAccounts();
+    const cleanLocal = localAccounts.filter((acc) =>
+      acc.user?.email && activeEmailsInProfiles.has(acc.user.email.toLowerCase().trim())
+    );
+    if (cleanLocal.length !== localAccounts.length) {
+      saveRegisteredAccounts(cleanLocal);
+    }
+
+    return list;
   }
 
-  // 1.5 Ambil dari Server Database API (dengan cache: 'no-store' agar selalu realtime)
+  // 2. Fallback ke Server Database API HANYA jika Supabase tidak aktif (offline mode)
   if (typeof window !== "undefined") {
     try {
       const qParam = query && query.trim() ? `?q=${encodeURIComponent(query.trim())}&_t=${Date.now()}` : `?_t=${Date.now()}`;
@@ -2180,52 +2189,13 @@ export async function fetchRegisteredStudents(query?: string): Promise<UserProfi
       if (res.ok) {
         const json = await res.json();
         if (json.success && Array.isArray(json.students)) {
-          for (const s of json.students) {
-            const clean = s.email?.toLowerCase().trim();
-            if (clean) {
-              const existingIdx = list.findIndex((item) => item.email.toLowerCase().trim() === clean);
-              if (existingIdx >= 0) {
-                // Perbarui avatar & data jika server memiliki avatarUrl yang lebih baru
-                if (s.avatarUrl) {
-                  list[existingIdx] = { ...list[existingIdx], ...s };
-                }
-              } else {
-                list.push(s);
-                seenEmails.add(clean);
-              }
-            }
-          }
+          return json.students;
         }
       }
     } catch (e) {
       console.warn("Gagal mengambil mahasiswa terdaftar dari server DB:", e);
     }
   }
-
-  // 2. Gabungkan dengan akun lokal dan sinkronkan avatar cloud ke cache lokal
-  const localAccounts = getRegisteredAccounts();
-  for (const acc of localAccounts) {
-    if (acc.user && acc.user.email) {
-      const clean = acc.user.email.toLowerCase().trim();
-      const cloudStudent = list.find((item) => item.email.toLowerCase().trim() === clean);
-      if (cloudStudent) {
-        // Sinkronkan avatar cloud terbaru ke akun lokal
-        if (cloudStudent.avatarUrl && acc.user.avatarUrl !== cloudStudent.avatarUrl) {
-          acc.user.avatarUrl = cloudStudent.avatarUrl;
-          acc.user.fullName = cloudStudent.fullName;
-        }
-      } else if (!seenEmails.has(clean)) {
-        if (!query || query.trim() === "" ||
-            acc.user.fullName.toLowerCase().includes(query.toLowerCase()) ||
-            (acc.user.nim && acc.user.nim.toLowerCase().includes(query.toLowerCase())) ||
-            clean.includes(query.toLowerCase())) {
-          list.push(acc.user);
-          seenEmails.add(clean);
-        }
-      }
-    }
-  }
-  saveRegisteredAccounts(localAccounts);
 
   return list;
 }
@@ -2333,42 +2303,103 @@ export function saveCurrentUser(user: UserProfile | null) {
  * Jika tidak ada sesi login, mengembalikan null agar website menampilkan login page.
  */
 export async function getActiveSessionUser(): Promise<UserProfile | null> {
+  const localUser = getCurrentUser();
+  if (!localUser || !localUser.email) return null;
+  const cleanEmail = localUser.email.toLowerCase().trim();
+
   if (isSupabaseConfigured && supabase) {
     try {
-      const { data: { session }, error } = await supabase.auth.getSession();
-      if (!error && session?.user) {
-        // Ambil profil detail dari tabel public.profiles
-        const { data: profile } = await supabase
-          .from("profiles")
-          .select("*")
-          .eq("id", session.user.id)
-          .single();
+      // 1. Cek sesi Supabase Auth jika ada
+      const { data: { session } } = await supabase.auth.getSession();
 
-        const userProfile: UserProfile = {
-          id: session.user.id,
-          fullName:
-            profile?.full_name ||
-            session.user.user_metadata?.full_name ||
-            session.user.email?.split("@")[0] ||
-            "Mahasiswa",
-          email: session.user.email || profile?.email || "",
-          nim: profile?.nim || session.user.user_metadata?.nim,
-          major: profile?.major || session.user.user_metadata?.major || "Teknologi Informasi",
-          semester: profile?.semester || session.user.user_metadata?.semester || 1,
-          campus: profile?.campus || "Universitas BSI (Bina Sarana Informatika)",
-          avatarUrl: profile?.avatar_url || session.user.user_metadata?.avatar_url,
-          createdAt: session.user.created_at,
-        };
+      // 2. Verifikasi langsung ke tabel profiles Supabase (Single Source of Truth)
+      const { data: profile, error } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("email", cleanEmail)
+        .maybeSingle();
 
-        saveCurrentUser(userProfile);
-        return userProfile;
+      // Jika akun sudah tidak ditemukan di tabel profiles Supabase (telah dihapus dari database)
+      if (error || !profile) {
+        // Otomatis bersihkan sesi dan seluruh cache akun lokal
+        saveCurrentUser(null);
+        const remaining = getRegisteredAccounts().filter(
+          (a) => a.user.email.toLowerCase().trim() !== cleanEmail
+        );
+        saveRegisteredAccounts(remaining);
+        try {
+          await supabase.auth.signOut();
+        } catch {}
+        return null;
       }
+
+      // Akun masih sah dan aktif di database
+      const userProfile: UserProfile = {
+        ...localUser,
+        id: profile.id || session?.user?.id || localUser.id,
+        fullName:
+          profile.full_name ||
+          session?.user?.user_metadata?.full_name ||
+          localUser.fullName,
+        email: profile.email || cleanEmail,
+        nim: profile.nim || localUser.nim,
+        major: profile.major || localUser.major,
+        semester: profile.semester || localUser.semester,
+        campus: profile.campus || localUser.campus,
+        avatarUrl: profile.avatar_url || localUser.avatarUrl,
+        createdAt: profile.created_at || localUser.createdAt,
+      };
+
+      saveCurrentUser(userProfile);
+      return userProfile;
     } catch (err) {
       console.warn("Gagal memeriksa sesi Supabase:", err);
     }
   }
 
-  return getCurrentUser();
+  return localUser;
+}
+
+/**
+ * Memverifikasi secara realtime apakah akun pengguna masih terdaftar di database.
+ * Jika akun telah dihapus dari database, fungsi ini mengembalikan false.
+ */
+export async function verifyUserAccountExists(email: string): Promise<boolean> {
+  if (!email) return false;
+  const cleanEmail = email.toLowerCase().trim();
+
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { data: profile, error } = await supabase
+        .from("profiles")
+        .select("id")
+        .eq("email", cleanEmail)
+        .maybeSingle();
+
+      if (error) {
+        // Abaikan error jaringan sesaat agar koneksi tidak terputus tidak sengaja
+        return true;
+      }
+      return Boolean(profile && profile.id);
+    } catch {
+      return true;
+    }
+  }
+
+  // Jika Supabase tidak aktif, verifikasi dengan server DB
+  if (typeof window !== "undefined") {
+    try {
+      const res = await fetch(`/api/db/students?q=${encodeURIComponent(cleanEmail)}`, { cache: "no-store" });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.success && Array.isArray(json.students)) {
+          return json.students.some((s: UserProfile) => s.email.toLowerCase().trim() === cleanEmail);
+        }
+      }
+    } catch {}
+  }
+
+  return true;
 }
 
 /**
@@ -2572,15 +2603,11 @@ export async function loginStudent(
     return { success: false, error: "Password wajib diisi" };
   }
 
-  // 1. Cek keberadaan akun di berbagai layer data
-  const accounts = getRegisteredAccounts();
-  const localFound = accounts.find(
-    (acc) => acc.user.email.toLowerCase() === cleanEmail
-  );
-
-  // 2. Cek apakah profil ada di Supabase Cloud (profiles table)
-  let cloudFoundProfile: UserProfile | null = null;
+  // 1. JIKA SUPABASE TERKONFIGURASI:
+  // Selalu verifikasi langsung ke database cloud Supabase secara realtime!
   if (isSupabaseConfigured && supabase) {
+    // a. Cek apakah profil ada di tabel profiles Supabase (Single Source of Truth)
+    let cloudFoundProfile: UserProfile | null = null;
     try {
       const { data: profileRow } = await supabase
         .from("profiles")
@@ -2604,37 +2631,33 @@ export async function loginStudent(
     } catch (err) {
       console.warn("Supabase profile check note:", err);
     }
-  }
 
-  // 3. Cek di Server Database API (/api/db/students)
-  let serverFoundProfile: UserProfile | null = null;
-  if (typeof window !== "undefined") {
-    try {
-      const res = await fetch(`/api/db/students?q=${encodeURIComponent(cleanEmail)}`);
-      if (res.ok) {
-        const json = await res.json();
-        if (json.success && Array.isArray(json.students)) {
-          const matched = json.students.find(
-            (s: UserProfile) => s.email.toLowerCase().trim() === cleanEmail
-          );
-          if (matched) {
-            serverFoundProfile = matched;
-          }
-        }
+    // Jika akun TIDAK ADA di tabel profiles Supabase (telah dihapus dari database atau belum terdaftar):
+    if (!cloudFoundProfile) {
+      // Bersihkan sisa cache lokal akun yang sudah terhapus
+      const filtered = getRegisteredAccounts().filter(
+        (a) => a.user.email.toLowerCase() !== cleanEmail
+      );
+      saveRegisteredAccounts(filtered);
+      if (getCurrentUser()?.email?.toLowerCase().trim() === cleanEmail) {
+        saveCurrentUser(null);
       }
-    } catch (e) {
-      console.warn("Gagal cek server DB saat login:", e);
+      try {
+        await supabase
+          .from("collaboration_invitations")
+          .delete()
+          .eq("id", `profile-record-${cleanEmail}`);
+      } catch {}
+
+      return {
+        success: false,
+        error: "Akun belum terdaftar atau telah dihapus dari database. Silakan daftar terlebih dahulu.",
+      };
     }
-  }
 
-  // Apakah akun terdaftar di sistem (Cloud, Server DB, atau Lokal)?
-  const isAccountExists = Boolean(cloudFoundProfile || serverFoundProfile || localFound);
-
-  // 4. Jika Supabase aktif, coba autentikasi dengan Supabase Auth
-  let supabaseAuthSuccess = false;
-  let supabaseAuthUser: UserProfile | null = null;
-
-  if (isSupabaseConfigured && supabase) {
+    // b. Akun terbukti ADA di database Supabase! Sekarang verifikasi password:
+    let supabaseAuthSuccess = false;
+    let supabaseAuthUser: UserProfile | null = null;
     try {
       const { data, error } = await supabase.auth.signInWithPassword({
         email: cleanEmail,
@@ -2643,19 +2666,18 @@ export async function loginStudent(
 
       if (!error && data.user) {
         supabaseAuthSuccess = true;
-        const profile = cloudFoundProfile;
         supabaseAuthUser = {
           id: data.user.id,
           fullName:
-            profile?.fullName ||
+            cloudFoundProfile.fullName ||
             data.user.user_metadata?.full_name ||
             cleanEmail.split("@")[0],
           email: cleanEmail,
-          nim: profile?.nim || data.user.user_metadata?.nim || "",
-          major: profile?.major || data.user.user_metadata?.major || "Teknologi Informasi",
-          semester: profile?.semester || data.user.user_metadata?.semester || 1,
-          campus: profile?.campus || "Universitas BSI (Bina Sarana Informatika)",
-          avatarUrl: profile?.avatarUrl || data.user.user_metadata?.avatar_url,
+          nim: cloudFoundProfile.nim || data.user.user_metadata?.nim || "",
+          major: cloudFoundProfile.major || data.user.user_metadata?.major || "Teknologi Informasi",
+          semester: cloudFoundProfile.semester || data.user.user_metadata?.semester || 1,
+          campus: cloudFoundProfile.campus || "Universitas BSI (Bina Sarana Informatika)",
+          avatarUrl: cloudFoundProfile.avatarUrl || data.user.user_metadata?.avatar_url,
           createdAt: data.user.created_at,
         };
       } else if (error) {
@@ -2669,59 +2691,57 @@ export async function loginStudent(
     } catch (err: any) {
       console.warn("Supabase Auth fallback:", err);
     }
-  }
 
-  // KONDISI A: Login Supabase Berhasil
-  if (supabaseAuthSuccess && supabaseAuthUser) {
-    // Sinkronkan ke cache lokal agar sesi stabil
-    const accs = getRegisteredAccounts();
-    if (!accs.some((a) => a.user.email.toLowerCase() === cleanEmail)) {
-      accs.push({ user: supabaseAuthUser, password });
+    // Jika Supabase Auth berhasil:
+    if (supabaseAuthSuccess && supabaseAuthUser) {
+      const accs = getRegisteredAccounts();
+      const idx = accs.findIndex((a) => a.user.email.toLowerCase() === cleanEmail);
+      if (idx >= 0) {
+        accs[idx] = { user: supabaseAuthUser, password };
+      } else {
+        accs.push({ user: supabaseAuthUser, password });
+      }
       saveRegisteredAccounts(accs);
-    }
-    saveCurrentUser(supabaseAuthUser);
-    return { success: true, user: supabaseAuthUser };
-  }
-
-  // KONDISI B: Pemeriksaan Cache Lokal
-  if (localFound) {
-    // Jika Supabase aktif tetapi akun tidak ada di Supabase Cloud (artinya sudah dihapus dari database pusat)
-    if (isSupabaseConfigured && supabase && !cloudFoundProfile && !serverFoundProfile) {
-      // Bersihkan sisa cache lokal akun yang sudah terhapus
-      const filtered = accounts.filter(
-        (a) => a.user.email.toLowerCase() !== cleanEmail
-      );
-      saveRegisteredAccounts(filtered);
-      return {
-        success: false,
-        error: "Akun belum terdaftar. Silakan daftar terlebih dahulu.",
-      };
+      saveCurrentUser(supabaseAuthUser);
+      return { success: true, user: supabaseAuthUser };
     }
 
-    if (localFound.password !== password) {
-      return {
-        success: false,
-        error: "Email atau password yang Anda masukkan salah.",
-      };
+    // Jika Supabase Auth gagal, periksa apakah password cocok dengan local cache
+    const accounts = getRegisteredAccounts();
+    const localFound = accounts.find((acc) => acc.user.email.toLowerCase() === cleanEmail);
+    if (localFound && localFound.password === password) {
+      const userToLogin = { ...cloudFoundProfile, ...localFound.user };
+      saveCurrentUser(userToLogin);
+      return { success: true, user: userToLogin };
     }
 
-    saveCurrentUser(localFound.user);
-    return { success: true, user: localFound.user };
-  }
-
-  // KONDISI C: Akun Ditemukan di Cloud / Server DB tapi Password Salah
-  if (isAccountExists) {
     return {
       success: false,
       error: "Email atau password yang Anda masukkan salah.",
     };
   }
 
-  // KONDISI D: Data Akun Tidak Ditemukan Sama Sekali
-  return {
-    success: false,
-    error: "Akun belum terdaftar. Silakan daftar terlebih dahulu.",
-  };
+  // 2. JIKA SUPABASE TIDAK AKTIF (Offline Mode)
+  const accounts = getRegisteredAccounts();
+  const localFound = accounts.find(
+    (acc) => acc.user.email.toLowerCase() === cleanEmail
+  );
+  if (!localFound) {
+    return {
+      success: false,
+      error: "Akun belum terdaftar. Silakan daftar terlebih dahulu.",
+    };
+  }
+
+  if (localFound.password !== password) {
+    return {
+      success: false,
+      error: "Email atau password yang Anda masukkan salah.",
+    };
+  }
+
+  saveCurrentUser(localFound.user);
+  return { success: true, user: localFound.user };
 }
 
 export async function requestStudentRegistration(data: {
