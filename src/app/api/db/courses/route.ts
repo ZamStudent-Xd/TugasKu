@@ -51,10 +51,19 @@ export async function GET(request: NextRequest) {
         if (!cName) continue;
         const cleanName = cName.trim().toLowerCase();
 
+        const student = db.profiles.find((s) =>
+          (effectiveUserId && s.id === effectiveUserId) ||
+          (effectiveEmail && s.email.toLowerCase().trim() === effectiveEmail)
+        );
+        const studentNim = (student?.nim || "").toLowerCase().trim();
+
         // Cek apakah user sudah punya mata kuliah dengan nama yang sama
         const hasOwnedCourse = db.courses.some((c) => {
-          const isOwner = (effectiveUserId && c.ownerId === effectiveUserId) ||
-            (effectiveEmail && c.ownerId?.toLowerCase().trim() === effectiveEmail);
+          const cOwner = (c.ownerId || "").toLowerCase().trim();
+          const isOwner =
+            (effectiveUserId && cOwner === effectiveUserId.toLowerCase()) ||
+            (effectiveEmail && cOwner === effectiveEmail) ||
+            (studentNim && cOwner === studentNim);
           return isOwner && c.name.trim().toLowerCase() === cleanName;
         });
 

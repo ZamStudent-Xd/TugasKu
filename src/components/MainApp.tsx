@@ -910,7 +910,7 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
         } else {
           addToast(
             "success",
-            `🎉 Selamat! Anda telah bergabung ke tugas kelompok "${result.task?.title || "Tugas"}"!`
+            `🎉 Selamat! Tugas berhasil ditambahkan ke mata kuliah "${result.task?.courseName || "Tugas"}" Anda!`
           );
         }
       } else {

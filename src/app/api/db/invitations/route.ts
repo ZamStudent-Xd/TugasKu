@@ -252,17 +252,35 @@ export async function PUT(request: NextRequest) {
 
       const targetCourseName = (inv.courseName || "").trim();
       if (targetCourseName) {
-        createdNewCourse = {
-          id: `course-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          ownerId: memberUserId,
-          name: targetCourseName,
-          lecturer: "Dosen Pengampu",
-          code: "KOLAB",
-          color: "indigo",
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-        targetCourse = createdNewCourse;
+        const cleanName = targetCourseName.toLowerCase();
+        const cleanMemberEmail = (profile?.email || "").toLowerCase().trim();
+        const cleanMemberNim = (profile?.nim || "").toLowerCase().trim();
+        const existingInDb = db.courses.find((c) => {
+          const cOwner = (c.ownerId || "").toLowerCase().trim();
+          const isOwner =
+            (memberUserId && cOwner === memberUserId.toLowerCase()) ||
+            (cleanMemberEmail && cOwner === cleanMemberEmail) ||
+            (cleanMemberNim && cOwner === cleanMemberNim);
+          return isOwner && c.name.trim().toLowerCase() === cleanName;
+        });
+
+        if (existingInDb) {
+          targetCourse = existingInDb;
+          createdNewCourse = null;
+        } else {
+          createdNewCourse = {
+            id: `course-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            ownerId: memberUserId,
+            name: targetCourseName,
+            lecturer: "Dosen Pengampu",
+            code: "KOLAB",
+            color: "indigo",
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
+          targetCourse = createdNewCourse;
+          db.courses.unshift(createdNewCourse);
+        }
       }
     }
 

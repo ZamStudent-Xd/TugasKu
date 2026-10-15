@@ -36,6 +36,77 @@ if (typeof window !== "undefined") {
 }
 
 // ============================================================================
+// HELPER DEDUPLIKASI MATA KULIAH (COURSES)
+// ============================================================================
+
+/**
+ * Deduplikasi mutlak mata kuliah berdasarkan nama (case-insensitive & trimmed).
+ * Aturan:
+ * 1. Tidak boleh ada 2 mata kuliah dengan nama yang sama.
+ * 2. Prioritaskan mata kuliah manual buatan pengguna (bukan placeholder KOLAB).
+ * 3. Prioritaskan mata kuliah milik pengguna (ownerId sesuai userId / email).
+ * 4. Pertahankan data yang paling lengkap (dosen, kode MK, warna).
+ */
+export function cleanAndDeduplicateCourses(
+  courses: Course[],
+  userId?: string,
+  email?: string
+): Course[] {
+  if (!Array.isArray(courses)) return [];
+  const cleanEmail = email ? email.toLowerCase().trim() : "";
+  const cleanUserId = userId ? userId.toLowerCase().trim() : "";
+  const mapByName = new Map<string, Course>();
+
+  for (const c of courses) {
+    if (!c || !c.name) continue;
+    const normName = c.name.trim().toLowerCase();
+    if (!normName) continue;
+
+    const existing = mapByName.get(normName);
+    if (!existing) {
+      mapByName.set(normName, c);
+      continue;
+    }
+
+    const existingIsColab = existing.code === "KOLAB" || existing.lecturer === "Dosen Pengampu";
+    const currentIsColab = c.code === "KOLAB" || c.lecturer === "Dosen Pengampu";
+
+    const existingIsOwner = (cleanUserId && existing.ownerId?.toLowerCase().trim() === cleanUserId) ||
+      (cleanEmail && existing.ownerId?.toLowerCase().trim() === cleanEmail);
+    const currentIsOwner = (cleanUserId && c.ownerId?.toLowerCase().trim() === cleanUserId) ||
+      (cleanEmail && c.ownerId?.toLowerCase().trim() === cleanEmail);
+
+    let chooseCurrent = false;
+
+    if (existingIsColab && !currentIsColab) {
+      // Yang baru bukan placeholder KOLAB, sedangkan yang lama cuma placeholder
+      chooseCurrent = true;
+    } else if (!existingIsColab && currentIsColab) {
+      // Pertahankan yang asli
+      chooseCurrent = false;
+    } else if (!existingIsOwner && currentIsOwner) {
+      // Yang baru milik user langsung
+      chooseCurrent = true;
+    } else if (existingIsOwner && !currentIsOwner) {
+      chooseCurrent = false;
+    } else {
+      // Utamakan data yang memiliki dosen/kode MK yang spesifik
+      const existingScore = (existing.lecturer && existing.lecturer !== "Dosen Pengampu" ? 2 : 0) +
+        (existing.code && existing.code !== "KOLAB" ? 2 : 0);
+      const currentScore = (c.lecturer && c.lecturer !== "Dosen Pengampu" ? 2 : 0) +
+        (c.code && c.code !== "KOLAB" ? 2 : 0);
+      chooseCurrent = currentScore > existingScore;
+    }
+
+    if (chooseCurrent) {
+      mapByName.set(normName, c);
+    }
+  }
+
+  return Array.from(mapByName.values());
+}
+
+// ============================================================================
 // HELPER LOCAL STORAGE
 // ============================================================================
 
@@ -43,7 +114,8 @@ function getLocalCourses(): Course[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = localStorage.getItem(COURSES_KEY);
-    return raw ? JSON.parse(raw) : [];
+    const parsed: Course[] = raw ? JSON.parse(raw) : [];
+    return cleanAndDeduplicateCourses(parsed);
   } catch {
     return [];
   }
@@ -51,7 +123,8 @@ function getLocalCourses(): Course[] {
 
 function saveLocalCourses(courses: Course[]) {
   if (typeof window !== "undefined") {
-    localStorage.setItem(COURSES_KEY, JSON.stringify(courses));
+    const cleaned = cleanAndDeduplicateCourses(courses);
+    localStorage.setItem(COURSES_KEY, JSON.stringify(cleaned));
   }
 }
 
@@ -232,9 +305,18 @@ export async function fetchCourses(userParam?: UserProfile | null): Promise<Cour
   const activeUser = userParam || getCurrentUser();
   const userId = activeUser?.id;
   const cleanEmail = activeUser?.email?.toLowerCase().trim() || "";
-  const coursesMap = new Map<string, Course>();
+  const collectedCourses: Course[] = [];
 
-  // 1. Ambil dari Supabase courses jika terkonfigurasi
+  // 1. Ambil penyimpanan lokal terlebih dahulu (agar kustomisasi nama, dosen, warna pengguna diutamakan)
+  const local = getLocalCourses();
+  for (const c of local) {
+    const isOwner = !c.ownerId || c.ownerId === activeUser?.id || (cleanEmail && c.ownerId.toLowerCase().trim() === cleanEmail);
+    if (isOwner) {
+      collectedCourses.push(c);
+    }
+  }
+
+  // 2. Ambil dari Supabase courses jika terkonfigurasi
   if (isSupabaseConfigured && supabase) {
     try {
       let query = supabase.from("courses").select("*").order("created_at", { ascending: false });
@@ -244,7 +326,7 @@ export async function fetchCourses(userParam?: UserProfile | null): Promise<Cour
       const { data, error } = await query;
       if (!error && data && data.length > 0) {
         for (const c of data) {
-          coursesMap.set(c.id, {
+          collectedCourses.push({
             id: c.id,
             name: c.name,
             lecturer: c.lecturer,
@@ -261,7 +343,33 @@ export async function fetchCourses(userParam?: UserProfile | null): Promise<Cour
     }
   }
 
-  // 1.5 Ambil mata kuliah dari kolaborasi Supabase (collaboration_invitations)
+  // 3. Ambil dari Server Database API jika ada
+  if (typeof window !== "undefined") {
+    try {
+      const qParams = new URLSearchParams();
+      if (userId) qParams.set("userId", userId);
+      if (cleanEmail) qParams.set("email", cleanEmail);
+
+      const url = `/api/db/courses${qParams.toString() ? `?${qParams.toString()}` : ""}`;
+      const res = await fetch(url);
+      if (res.ok) {
+        const json = await res.json();
+        if (json.success && Array.isArray(json.courses) && json.courses.length > 0) {
+          for (const c of json.courses) {
+            collectedCourses.push(c);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("Gagal mengambil mata kuliah dari server DB:", e);
+    }
+  }
+
+  // Deduplikasi awal terhadap mata kuliah manual / tersimpan
+  let currentCourses = cleanAndDeduplicateCourses(collectedCourses, userId, cleanEmail);
+
+  // 4. Ambil mata kuliah dari kolaborasi Supabase (collaboration_invitations)
+  // HANYA buatkan placeholder jika mata kuliah tersebut BENAR-BENAR BELUM ADA di daftar pengguna!
   if (isSupabaseConfigured && supabase && (userId || cleanEmail)) {
     try {
       const { data: collabRows } = await supabase
@@ -287,9 +395,7 @@ export async function fetchCourses(userParam?: UserProfile | null): Promise<Cour
             if (isInviter || (cleanEmail && rowInvitedEmail === cleanEmail)) {
               if (row.task_payload) {
                 const c = row.task_payload as Course;
-                if (!coursesMap.has(c.id)) {
-                  coursesMap.set(c.id, c);
-                }
+                currentCourses.push(c);
               }
             }
             continue;
@@ -299,10 +405,10 @@ export async function fetchCourses(userParam?: UserProfile | null): Promise<Cour
             const courseName = (row.course_name || row.task_payload?.courseName || "").trim();
             if (courseName) {
               const cleanCourseName = courseName.toLowerCase();
-              const exists = Array.from(coursesMap.values()).some(
+              const alreadyHas = currentCourses.some(
                 (c) => c.name.trim().toLowerCase() === cleanCourseName
               );
-              if (!exists) {
+              if (!alreadyHas) {
                 const autoCourse: Course = {
                   id: `course-${row.task_payload?.courseId || Date.now()}`,
                   name: courseName,
@@ -313,7 +419,7 @@ export async function fetchCourses(userParam?: UserProfile | null): Promise<Cour
                   createdAt: row.created_at || new Date().toISOString(),
                   updatedAt: new Date().toISOString(),
                 };
-                coursesMap.set(autoCourse.id, autoCourse);
+                currentCourses.push(autoCourse);
               }
             }
           }
@@ -324,48 +430,15 @@ export async function fetchCourses(userParam?: UserProfile | null): Promise<Cour
     }
   }
 
-  // 2. Ambil dari Server Database API jika ada
-  if (typeof window !== "undefined") {
-    try {
-      const qParams = new URLSearchParams();
-      if (userId) qParams.set("userId", userId);
-      if (cleanEmail) qParams.set("email", cleanEmail);
-
-      const url = `/api/db/courses${qParams.toString() ? `?${qParams.toString()}` : ""}`;
-      const res = await fetch(url);
-      if (res.ok) {
-        const json = await res.json();
-        if (json.success && Array.isArray(json.courses) && json.courses.length > 0) {
-          for (const c of json.courses) {
-            if (!coursesMap.has(c.id)) {
-              coursesMap.set(c.id, c);
-            }
-          }
-        }
-      }
-    } catch (e) {
-      console.warn("Gagal mengambil mata kuliah dari server DB:", e);
-    }
-  }
-
-  // 3. Gabungkan dengan penyimpanan lokal pengguna (JANGAN PERNAH DIHAPUS OLEH ARRAY KOSONG DARI SERVER!)
-  const local = getLocalCourses();
-  for (const c of local) {
-    const isOwner = !c.ownerId || c.ownerId === activeUser?.id || (cleanEmail && c.ownerId.toLowerCase().trim() === cleanEmail);
-    if (isOwner && !coursesMap.has(c.id)) {
-      coursesMap.set(c.id, c);
-    }
-  }
-
-  // 4. Pastikan mata kuliah dari tugas kolaborasi otomatis tersedia di daftar mata kuliah pengguna
+  // 5. Pastikan mata kuliah dari tugas kolaborasi lokal otomatis tersedia jika belum ada
   const currentTasks = getLocalTasks();
   for (const t of currentTasks) {
     if (t.courseName) {
       const cleanCourseName = t.courseName.trim().toLowerCase();
-      const exists = Array.from(coursesMap.values()).some(
+      const alreadyHas = currentCourses.some(
         (c) => c.name.trim().toLowerCase() === cleanCourseName
       );
-      if (!exists) {
+      if (!alreadyHas) {
         const autoCourse: Course = {
           id: `course-${t.courseId || Date.now()}`,
           name: t.courseName,
@@ -376,26 +449,45 @@ export async function fetchCourses(userParam?: UserProfile | null): Promise<Cour
           createdAt: t.createdAt,
           updatedAt: t.updatedAt,
         };
-        coursesMap.set(autoCourse.id, autoCourse);
+        currentCourses.push(autoCourse);
       }
     }
   }
 
-  // 5. Bersihkan mata kuliah kolaborasi otomatis jika anggota sudah tidak lagi memiliki tugas pada mata kuliah tersebut
-  for (const [cId, c] of Array.from(coursesMap.entries())) {
+  // 6. Bersihkan mata kuliah kolaborasi otomatis jika anggota sudah tidak lagi memiliki tugas pada mata kuliah tersebut
+  currentCourses = currentCourses.filter((c) => {
     if (c.code === "KOLAB") {
       const hasAssociatedTask = currentTasks.some(
         (t) => (t.courseName || "").trim().toLowerCase() === c.name.trim().toLowerCase()
       );
-      if (!hasAssociatedTask) {
-        coursesMap.delete(cId);
+      return hasAssociatedTask;
+    }
+    return true;
+  });
+
+  // 7. Deduplikasi final (dijamin 1 mata kuliah per nama unik)
+  const canonicalCourses = cleanAndDeduplicateCourses(currentCourses, userId, cleanEmail);
+
+  // 8. TAUTKAN TUGAS KE MATA KULIAH KANONIKAL PENGGUNA:
+  // Jika anggota sudah memiliki mata kuliah tersebut, pastikan tugas kelompok otomatis menggunakan id mata kuliah milik anggota!
+  let tasksChanged = false;
+  for (const t of currentTasks) {
+    if (t.courseName) {
+      const cleanName = t.courseName.trim().toLowerCase();
+      const canonical = canonicalCourses.find((c) => c.name.trim().toLowerCase() === cleanName);
+      if (canonical && t.courseId !== canonical.id) {
+        t.courseId = canonical.id;
+        t.courseName = canonical.name;
+        tasksChanged = true;
       }
     }
   }
+  if (tasksChanged) {
+    saveLocalTasks(currentTasks);
+  }
 
-  const result = Array.from(coursesMap.values());
-  saveLocalCourses(result);
-  return result;
+  saveLocalCourses(canonicalCourses);
+  return canonicalCourses;
 }
 
 export async function addCourse(course: Omit<Course, "id"> & { id?: string }): Promise<Course> {
@@ -1700,26 +1792,26 @@ export async function acceptTaskInvitation(
   );
   saveTaskInvitations(updatedInvs);
 
-  // 5. Simpan task yang sudah digabungkan ke localStorage pengguna ini
-  if (taskToJoin) {
-    const localTasks = getLocalTasks();
-    const tIdx = localTasks.findIndex((t) => t.id === taskToJoin!.id);
-    if (tIdx >= 0) {
-      localTasks[tIdx] = taskToJoin;
-    } else {
-      localTasks.unshift(taskToJoin);
-    }
-    saveLocalTasks(localTasks);
-  }
-
-  // 6. Pastikan mata kuliah tersedia di daftar mata kuliah pengguna ini
+  // 5. Pastikan mata kuliah ditautkan ke mata kuliah anggota tanpa membuat duplikat
   let createdNewCourse: Course | undefined = undefined;
   const targetCourseName = (courseNameToAdd || taskToJoin?.courseName || "").trim();
   if (targetCourseName) {
-    const localCourses = getLocalCourses();
+    let currentCourses = getLocalCourses();
     const cleanName = targetCourseName.toLowerCase();
-    const existingCourse = localCourses.find((c) => c.name.trim().toLowerCase() === cleanName);
-    if (!existingCourse) {
+    const existingCourse = currentCourses.find((c) => c.name.trim().toLowerCase() === cleanName);
+
+    if (existingCourse) {
+      // JIKA MATA KULIAH SUDAH ADA DI ANGGOTA:
+      // Tautkan tugas ke mata kuliah yang sudah ada tersebut dan JANGAN duplikasi!
+      if (taskToJoin) {
+        taskToJoin.courseId = existingCourse.id;
+        taskToJoin.courseName = existingCourse.name;
+      }
+      createdNewCourse = undefined; // Tandai bahwa mata kuliah tidak dibuat baru
+      saveLocalCourses(cleanAndDeduplicateCourses(currentCourses, currentUser.id, currentUser.email));
+    } else {
+      // JIKA MATA KULIAH BELUM ADA:
+      // Tambahkan mata kuliah baru beserta tugasnya
       createdNewCourse = {
         id: `course-${taskToJoin?.courseId || Date.now()}`,
         name: targetCourseName,
@@ -1730,11 +1822,25 @@ export async function acceptTaskInvitation(
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
-      localCourses.unshift(createdNewCourse);
-      saveLocalCourses(localCourses);
-    } else {
-      createdNewCourse = existingCourse;
+      currentCourses.unshift(createdNewCourse);
+      saveLocalCourses(cleanAndDeduplicateCourses(currentCourses, currentUser.id, currentUser.email));
+      if (taskToJoin) {
+        taskToJoin.courseId = createdNewCourse.id;
+        taskToJoin.courseName = createdNewCourse.name;
+      }
     }
+  }
+
+  // 6. Simpan task yang sudah digabungkan ke localStorage pengguna ini (dengan courseId yang sudah tepat)
+  if (taskToJoin) {
+    const localTasks = getLocalTasks();
+    const tIdx = localTasks.findIndex((t) => t.id === taskToJoin!.id);
+    if (tIdx >= 0) {
+      localTasks[tIdx] = taskToJoin;
+    } else {
+      localTasks.unshift(taskToJoin);
+    }
+    saveLocalTasks(localTasks);
   }
 
   // 7. Sync ke API route serverDb jika aktif
