@@ -192,7 +192,6 @@ export function recordDeletedTaskId(id: string): void {
  */
 export function checkIsTaskOwner(task: Task, user?: UserProfile | null): boolean {
   if (!user) return false;
-  if (task.taskType !== "group") return true;
 
   const userIds = [
     user.id?.toLowerCase().trim(),
@@ -202,6 +201,16 @@ export function checkIsTaskOwner(task: Task, user?: UserProfile | null): boolean
   ].filter(Boolean) as string[];
 
   const taskCreator = (task.createdBy || "").toLowerCase().trim();
+
+  if (task.taskType !== "group") {
+    if (taskCreator) {
+      return userIds.some(
+        (uid) => uid === taskCreator || taskCreator.includes(uid) || uid.includes(taskCreator)
+      );
+    }
+    return true;
+  }
+
   if (taskCreator && userIds.some((uid) => uid === taskCreator || taskCreator.includes(uid) || uid.includes(taskCreator))) {
     return true;
   }
@@ -396,10 +405,17 @@ export async function fetchCourses(userParam?: UserProfile | null): Promise<Cour
   const cleanEmail = activeUser?.email?.toLowerCase().trim() || "";
   const collectedCourses: Course[] = [];
 
-  // 1. Ambil penyimpanan lokal terlebih dahulu (agar kustomisasi nama, dosen, warna pengguna diutamakan)
+  // Jika tidak ada user yang sedang login, kembalikan daftar kosong
+  if (!activeUser || (!userId && !cleanEmail)) {
+    return [];
+  }
+
+  // 1. Ambil penyimpanan lokal terlebih dahulu (hanya yang terverifikasi milik user ini)
   const local = getLocalCourses();
   for (const c of local) {
-    const isOwner = !c.ownerId || c.ownerId === activeUser?.id || (cleanEmail && c.ownerId.toLowerCase().trim() === cleanEmail);
+    const isOwner =
+      (userId && c.ownerId === userId) ||
+      (cleanEmail && c.ownerId?.toLowerCase().trim() === cleanEmail);
     if (isOwner) {
       collectedCourses.push(c);
     }
@@ -486,11 +502,17 @@ export async function fetchCourses(userParam?: UserProfile | null): Promise<Cour
 
           // Jika ini adalah record mata kuliah tersimpan (COURSE_RECORD)
           if (row.task_id === "COURSE_RECORD") {
-            if (isInviter || (cleanEmail && rowInvitedEmail === cleanEmail)) {
-              if (row.task_payload) {
-                const c = row.task_payload as Course;
-                currentCourses.push(c);
-              }
+            const payloadOwner = (row.task_payload?.ownerId || "").toLowerCase().trim();
+            const isMatchOwner =
+              (userId && payloadOwner === userId.toLowerCase()) ||
+              (cleanEmail && payloadOwner === cleanEmail);
+
+            if (isMatchOwner && row.task_payload) {
+              const c = row.task_payload as Course;
+              currentCourses.push(c);
+            } else if (cleanEmail && rowInvitedEmail === cleanEmail && !isMatchOwner) {
+              // Ini sisa COURSE_RECORD yatim dari akun terdahulu yang sudah dihapus, bersihkan dari database
+              supabase.from("collaboration_invitations").delete().eq("id", row.id).then(() => {});
             }
             continue;
           }
@@ -528,6 +550,11 @@ export async function fetchCourses(userParam?: UserProfile | null): Promise<Cour
   const deletedTaskIds = getDeletedTaskIds();
   const currentTasks = getLocalTasks().filter((t) => !deletedTaskIds.has(t.id));
   for (const t of currentTasks) {
+    const isTaskOfUser =
+      checkIsTaskOwner(t, activeUser) ||
+      (cleanEmail && t.members?.some((m) => m.userId?.toLowerCase().trim() === cleanEmail));
+    if (!isTaskOfUser) continue;
+
     if (t.courseName) {
       const cleanCourseName = t.courseName.trim().toLowerCase();
       const alreadyHas = currentCourses.some(
@@ -2323,6 +2350,11 @@ export async function getActiveSessionUser(): Promise<UserProfile | null> {
       if (error || !profile) {
         // Otomatis bersihkan sesi dan seluruh cache akun lokal
         saveCurrentUser(null);
+        if (typeof window !== "undefined") {
+          localStorage.removeItem(COURSES_KEY);
+          localStorage.removeItem(TASKS_KEY);
+          localStorage.removeItem(TASK_INVITATIONS_KEY);
+        }
         const remaining = getRegisteredAccounts().filter(
           (a) => a.user.email.toLowerCase().trim() !== cleanEmail
         );
@@ -2642,11 +2674,20 @@ export async function loginStudent(
       if (getCurrentUser()?.email?.toLowerCase().trim() === cleanEmail) {
         saveCurrentUser(null);
       }
+      if (typeof window !== "undefined") {
+        localStorage.removeItem(COURSES_KEY);
+        localStorage.removeItem(TASKS_KEY);
+        localStorage.removeItem(TASK_INVITATIONS_KEY);
+      }
       try {
         await supabase
           .from("collaboration_invitations")
           .delete()
           .eq("id", `profile-record-${cleanEmail}`);
+        await supabase
+          .from("collaboration_invitations")
+          .delete()
+          .eq("invited_email", cleanEmail);
       } catch {}
 
       return {
@@ -2702,6 +2743,16 @@ export async function loginStudent(
         accs.push({ user: supabaseAuthUser, password });
       }
       saveRegisteredAccounts(accs);
+
+      const prevUser = getCurrentUser();
+      if (prevUser && prevUser.email.toLowerCase().trim() !== cleanEmail) {
+        if (typeof window !== "undefined") {
+          localStorage.removeItem(COURSES_KEY);
+          localStorage.removeItem(TASKS_KEY);
+          localStorage.removeItem(TASK_INVITATIONS_KEY);
+        }
+      }
+
       saveCurrentUser(supabaseAuthUser);
       return { success: true, user: supabaseAuthUser };
     }
@@ -2710,6 +2761,14 @@ export async function loginStudent(
     const accounts = getRegisteredAccounts();
     const localFound = accounts.find((acc) => acc.user.email.toLowerCase() === cleanEmail);
     if (localFound && localFound.password === password) {
+      const prevUser = getCurrentUser();
+      if (prevUser && prevUser.email.toLowerCase().trim() !== cleanEmail) {
+        if (typeof window !== "undefined") {
+          localStorage.removeItem(COURSES_KEY);
+          localStorage.removeItem(TASKS_KEY);
+          localStorage.removeItem(TASK_INVITATIONS_KEY);
+        }
+      }
       const userToLogin = { ...cloudFoundProfile, ...localFound.user };
       saveCurrentUser(userToLogin);
       return { success: true, user: userToLogin };
@@ -2738,6 +2797,15 @@ export async function loginStudent(
       success: false,
       error: "Email atau password yang Anda masukkan salah.",
     };
+  }
+
+  const prevUser = getCurrentUser();
+  if (prevUser && prevUser.email.toLowerCase().trim() !== cleanEmail) {
+    if (typeof window !== "undefined") {
+      localStorage.removeItem(COURSES_KEY);
+      localStorage.removeItem(TASKS_KEY);
+      localStorage.removeItem(TASK_INVITATIONS_KEY);
+    }
   }
 
   saveCurrentUser(localFound.user);
@@ -2944,6 +3012,12 @@ export async function verifyStudentRegistration(
   savePendingVerifications(pending);
 
   saveCurrentUser(item.user);
+  if (typeof window !== "undefined") {
+    // Reset cache lokal agar akun baru benar-benar bersih dan kosong secara default (0 mata kuliah & 0 tugas)
+    localStorage.removeItem(COURSES_KEY);
+    localStorage.removeItem(TASKS_KEY);
+    localStorage.removeItem(TASK_INVITATIONS_KEY);
+  }
 
   // 3. SIMPAN KE SERVER DATABASE AGAR AKUN LANGSUNG TERSEDIA DI SEMUA BROWSER & SESI
   if (typeof window !== "undefined") {
@@ -3011,6 +3085,11 @@ export async function logoutStudent(): Promise<void> {
     }
   }
   saveCurrentUser(null);
+  if (typeof window !== "undefined") {
+    localStorage.removeItem(COURSES_KEY);
+    localStorage.removeItem(TASKS_KEY);
+    localStorage.removeItem(TASK_INVITATIONS_KEY);
+  }
 }
 
 /**
