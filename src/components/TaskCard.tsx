@@ -139,28 +139,40 @@ export function TaskCard({
             </button>
 
             {menuOpen && (
-              <div className="absolute right-0 top-9 w-36 bg-white rounded-2xl shadow-xl border border-gray-100 p-1.5 z-30">
+              <div className="absolute right-0 top-9 w-68 bg-white rounded-2xl shadow-xl border border-gray-100 p-1.5 z-30">
                 <button
                   onClick={() => {
                     setMenuOpen(false);
                     onEdit(task);
                   }}
-                  className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 rounded-xl cursor-pointer"
+                  className="w-full flex items-center gap-2.5 px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 rounded-xl transition-colors cursor-pointer text-left"
                 >
-                  <Edit3 className="w-3.5 h-3.5 text-indigo-500" />
+                  <Edit3 className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
                   <span>Edit Tugas</span>
                 </button>
                 {task.taskType === "group" && (
-                  <button
-                    onClick={() => {
-                      setMenuOpen(false);
-                      onInvite(task);
-                    }}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-purple-700 hover:bg-purple-50 rounded-xl cursor-pointer"
-                  >
-                    <UserPlus className="w-3.5 h-3.5 text-purple-500" />
-                    <span>Undang Teman</span>
-                  </button>
+                  <>
+                    <button
+                      onClick={() => {
+                        setMenuOpen(false);
+                        onInvite(task);
+                      }}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 text-xs font-semibold text-purple-700 hover:bg-purple-50 rounded-xl transition-colors cursor-pointer text-left"
+                    >
+                      <Users className="w-3.5 h-3.5 text-purple-500 shrink-0" />
+                      <span>Lihat Anggota Lainnya Termasuk Ketua</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setMenuOpen(false);
+                        onInvite(task);
+                      }}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 text-xs font-semibold text-indigo-700 hover:bg-indigo-50 rounded-xl transition-colors cursor-pointer text-left"
+                    >
+                      <UserPlus className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                      <span>Undang Teman</span>
+                    </button>
+                  </>
                 )}
                 <button
                   onClick={() => {
@@ -193,17 +205,17 @@ export function TaskCard({
                 <MoreVertical className="w-3.5 h-3.5" />
               </button>
               {menuOpen && (
-                <div className="absolute right-0 top-8 w-44 bg-white rounded-2xl shadow-xl border border-gray-100 p-1.5 z-30">
+                <div className="absolute right-0 top-8 w-68 bg-white rounded-2xl shadow-xl border border-gray-100 p-1.5 z-30">
                   {task.taskType === "group" && (
                     <button
                       onClick={() => {
                         setMenuOpen(false);
                         onInvite(task);
                       }}
-                      className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-purple-700 hover:bg-purple-50 rounded-xl cursor-pointer"
+                      className="w-full flex items-center gap-2.5 px-3 py-2 text-xs font-semibold text-purple-700 hover:bg-purple-50 rounded-xl transition-colors cursor-pointer text-left"
                     >
-                      <Users className="w-3.5 h-3.5 text-purple-500" />
-                      <span>Lihat Anggota</span>
+                      <Users className="w-3.5 h-3.5 text-purple-500 shrink-0" />
+                      <span>Lihat Anggota Lainnya Termasuk Ketua</span>
                     </button>
                   )}
                   <button
@@ -211,9 +223,9 @@ export function TaskCard({
                       setMenuOpen(false);
                       onDelete(task.id);
                     }}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-rose-600 hover:bg-rose-50 rounded-xl cursor-pointer"
+                    className="w-full flex items-center gap-2.5 px-3 py-2 text-xs font-semibold text-rose-600 hover:bg-rose-50 rounded-xl transition-colors cursor-pointer text-left"
                   >
-                    <LogOut className="w-3.5 h-3.5 text-rose-500" />
+                    <LogOut className="w-3.5 h-3.5 text-rose-500 shrink-0" />
                     <span>Keluar dari Tugas</span>
                   </button>
                 </div>
@@ -335,21 +347,34 @@ export function TaskCard({
           </button>
 
           {isOwner ? (
-            <button
-              onClick={() => onInvite(task)}
-              className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-600 hover:text-indigo-800 transition-colors cursor-pointer"
-            >
-              <UserPlus className="w-3.5 h-3.5" />
-              <span>Undang</span>
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => onInvite(task)}
+                className="inline-flex items-center gap-1 text-[11px] font-bold text-purple-600 hover:text-purple-800 transition-colors cursor-pointer"
+                title="Lihat daftar anggota kelompok & ketua kolaborasi"
+              >
+                <Users className="w-3.5 h-3.5" />
+                <span>Lihat Anggota</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onInvite(task)}
+                className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-600 hover:text-indigo-800 transition-colors cursor-pointer"
+              >
+                <UserPlus className="w-3.5 h-3.5" />
+                <span>Undang</span>
+              </button>
+            </div>
           ) : (
             <button
+              type="button"
               onClick={() => onInvite(task)}
               className="inline-flex items-center gap-1.5 text-[11px] font-bold text-purple-600 hover:text-purple-800 transition-colors cursor-pointer"
-              title="Lihat daftar anggota kolaborasi"
+              title="Lihat siapa saja anggota kelompok & ketua kolaborasi tugas ini"
             >
               <Users className="w-3.5 h-3.5" />
-              <span>Lihat Anggota</span>
+              <span>Lihat Anggota Lainnya Termasuk Ketua</span>
             </button>
           )}
         </div>

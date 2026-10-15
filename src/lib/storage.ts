@@ -984,94 +984,96 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
               ));
 
             if (isInviter || isMember) {
-              // Jika status diterima, pastikan anggota terdaftar di t.members dengan nama asli, BUKAN duplikat NIM
-              if (row.status === "accepted" && rowInvitedEmail && !row.id.startsWith("task-base-")) {
-                const members = t.members || [];
-                const student = allStudents.find((s) => s.email.toLowerCase().trim() === rowInvitedEmail);
+              const allRowsForThisTask = collabRows.filter((r) => r.task_id === t.id);
 
-                const alreadyMember = members.some((m) => {
-                  const mUser = (m.userId || "").toLowerCase().trim();
-                  const mName = (m.fullName || "").toLowerCase().trim();
-                  const mEmail = ((m as any).email || "").toLowerCase().trim();
+              // 1. Dapatkan informasi Ketua Kolaborasi (Owner)
+              const ownerRow =
+                allRowsForThisTask.find((r) => r.id.startsWith("task-base-")) ||
+                allRowsForThisTask.find((r) => r.invited_by || r.inviter_name) ||
+                allRowsForThisTask[0];
 
-                  if (mEmail && mEmail === rowInvitedEmail) return true;
-                  if (mUser === rowInvitedEmail) return true;
-                  if (cleanEmail && rowInvitedEmail === cleanEmail) {
-                    if (userId && mUser === userId.toLowerCase()) return true;
-                    if (userFullName && mName === userFullName) return true;
-                  }
-                  if (student) {
-                    if (student.id && mUser === student.id.toLowerCase()) return true;
-                    if (student.fullName && mName === student.fullName.toLowerCase().trim()) return true;
-                    if (student.nim && (mName === student.nim.toLowerCase().trim() || mUser.includes(student.nim.toLowerCase().trim()) || mName.includes(student.nim.toLowerCase().trim()))) return true;
-                  }
-                  if (mName === rowInvitedEmail.split("@")[0].toLowerCase().trim()) return true;
-                  return false;
-                });
+              const ownerId = (ownerRow?.invited_by || t.createdBy || "").trim();
+              const ownerName = (ownerRow?.inviter_name || "").trim() || "Ketua Kolaborasi";
+              const ownerAvatar = ownerRow?.inviter_avatar;
 
-                if (!alreadyMember) {
-                  const memberToAdd: TaskMember = (rowInvitedEmail === cleanEmail && activeUser)
-                    ? {
-                        userId: userId || rowInvitedEmail,
-                        taskId: t.id,
-                        fullName: activeUser.fullName,
-                        avatarUrl: activeUser.avatarUrl,
-                        role: "member" as const,
-                        joinedAt: row.created_at || new Date().toISOString(),
-                      }
-                    : {
-                        userId: student?.id || rowInvitedEmail,
-                        taskId: t.id,
-                        fullName: student?.fullName || rowInvitedEmail.split("@")[0],
-                        avatarUrl: student?.avatarUrl || `https://api.dicebear.com/7.x/bottts/svg?seed=${rowInvitedEmail}`,
-                        role: "member" as const,
-                        joinedAt: row.created_at || new Date().toISOString(),
-                      };
-                  t.members = cleanAndDeduplicateMembers([...members, memberToAdd], allStudents);
-                }
-              }
+              const ownerStudent = allStudents.find((s) => {
+                if (s.id && ownerId && s.id.toLowerCase() === ownerId.toLowerCase()) return true;
+                if (s.email && ownerId && s.email.toLowerCase().trim() === ownerId.toLowerCase().trim()) return true;
+                if (s.fullName && ownerName && s.fullName.toLowerCase().trim() === ownerName.toLowerCase()) return true;
+                return false;
+              });
 
-              // PENTING: Saring anggota tugas kelompok terhadap baris undangan aktif di Supabase!
-              // Jika seseorang tertera di t.members tetapi baris undangannya sudah dihapus/tidak accepted,
-              // berarti orang tersebut sudah keluar/dikeluarkan dari kolaborasi!
-              const acceptedInviteeEmailsForTask = new Set(
-                collabRows
-                  .filter((r) => r.task_id === t.id && r.status === "accepted" && !r.id.startsWith("task-base-"))
-                  .map((r) => (r.invited_email || "").toLowerCase().trim())
-                  .filter(Boolean)
+              const ownerMember: TaskMember = {
+                userId: ownerStudent?.id || ownerId || "owner-task",
+                taskId: t.id,
+                fullName: ownerStudent?.fullName || ownerName,
+                avatarUrl: ownerStudent?.avatarUrl || ownerAvatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(ownerName)}`,
+                role: "owner",
+                joinedAt: ownerRow?.created_at || t.createdAt || new Date().toISOString(),
+              };
+
+              // 2. Dapatkan seluruh anggota yang statusnya accepted di Supabase Cloud untuk tugas ini
+              const acceptedRows = allRowsForThisTask.filter(
+                (r) => r.status === "accepted" && !r.id.startsWith("task-base-")
               );
 
-              const validatedMembers = (t.members || []).filter((m) => {
-                const isCreator =
-                  (t.createdBy && (
-                    m.userId?.toLowerCase() === t.createdBy.toLowerCase() ||
-                    (cleanEmail && m.userId?.toLowerCase() === cleanEmail)
-                  )) ||
-                  (!t.createdBy && m.role === "owner");
-                if (isCreator) return true;
+              const acceptedMemberObjs: TaskMember[] = acceptedRows.map((r) => {
+                const memEmail = (r.invited_email || "").toLowerCase().trim();
+                const memStudent = allStudents.find((s) => s.email.toLowerCase().trim() === memEmail);
 
+                // Jika anggota ini adalah user yang sedang aktif login, gunakan profil activeUser
+                if (cleanEmail && memEmail === cleanEmail && activeUser) {
+                  return {
+                    userId: activeUser.id || memEmail,
+                    taskId: t.id,
+                    fullName: activeUser.fullName,
+                    avatarUrl: activeUser.avatarUrl,
+                    role: "member" as const,
+                    joinedAt: r.created_at || new Date().toISOString(),
+                  };
+                }
+
+                return {
+                  userId: memStudent?.id || memEmail,
+                  taskId: t.id,
+                  fullName: memStudent?.fullName || memEmail.split("@")[0],
+                  avatarUrl: memStudent?.avatarUrl || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(memEmail)}`,
+                  role: "member" as const,
+                  joinedAt: r.created_at || new Date().toISOString(),
+                };
+              });
+
+              // Gabungkan: Ketua Kolaborasi + Seluruh Anggota Terdaftar yang Diterima
+              const existingMembers = t.members || [];
+              const combinedList = [ownerMember, ...acceptedMemberObjs, ...existingMembers];
+
+              const acceptedInviteeEmailsForTask = new Set(
+                acceptedRows.map((r) => (r.invited_email || "").toLowerCase().trim()).filter(Boolean)
+              );
+
+              const validatedMembers = combinedList.filter((m) => {
+                if (m.role === "owner") return true;
                 const mUser = (m.userId || "").toLowerCase().trim();
                 const mName = (m.fullName || "").toLowerCase().trim();
                 const student = allStudents.find(
                   (s) =>
                     (s.id && s.id.toLowerCase() === mUser) ||
                     (s.email && s.email.toLowerCase().trim() === mUser) ||
-                    (s.nim && (mName === s.nim.toLowerCase().trim() || mUser.includes(s.nim.toLowerCase().trim()) || mName.includes(s.nim.toLowerCase().trim()))) ||
+                    (s.nim && (mName === s.nim.toLowerCase().trim() || mUser.includes(s.nim.toLowerCase().trim()))) ||
                     (s.fullName && s.fullName.toLowerCase().trim() === mName)
                 );
                 const sEmail = (student?.email || mUser).toLowerCase().trim();
                 const sNim = (student?.nim || "").toLowerCase().trim();
 
-                const isStillAccepted =
+                return (
                   acceptedInviteeEmailsForTask.has(sEmail) ||
                   acceptedInviteeEmailsForTask.has(mUser) ||
-                  (sNim && Array.from(acceptedInviteeEmailsForTask).some((em) => em.startsWith(sNim + "@") || em.includes(sNim)));
-
-                return isStillAccepted;
+                  (sNim && Array.from(acceptedInviteeEmailsForTask).some((em) => em.startsWith(sNim + "@") || em.includes(sNim)))
+                );
               });
 
               t.members = cleanAndDeduplicateMembers(validatedMembers, allStudents);
-
+              t.createdBy = ownerMember.userId;
               if (!tasksMap.has(t.id)) {
                 tasksMap.set(t.id, t);
               } else {

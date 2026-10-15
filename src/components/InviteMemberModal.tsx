@@ -36,6 +36,7 @@ export function InviteMemberModal({
   const [registeredStudents, setRegisteredStudents] = useState<UserProfile[]>([]);
   const [isLoadingStudents, setIsLoadingStudents] = useState(false);
   const [serverPendingEmails, setServerPendingEmails] = useState<string[]>([]);
+  const [serverMembers, setServerMembers] = useState<TaskMember[]>([]);
 
   const currentUser = useMemo(() => propUser || getCurrentUser(), [propUser, isOpen]);
   const isOwner = useMemo(() => {
@@ -43,10 +44,11 @@ export function InviteMemberModal({
     return checkIsTaskOwner(task, currentUser);
   }, [task, currentUser]);
 
-  // Sinkronkan status undangan aktif dari server DB untuk tugas ini
+  // Sinkronkan status undangan & seluruh anggota aktif dari server DB untuk tugas ini
   useEffect(() => {
     if (!isOpen || !task?.id) {
       setServerPendingEmails([]);
+      setServerMembers([]);
       return;
     }
 
@@ -57,8 +59,56 @@ export function InviteMemberModal({
         if (isMounted && data.success && Array.isArray(data.invitations)) {
           const pending = data.invitations
             .filter((inv: any) => inv.status === "pending")
-            .map((inv: any) => inv.invitedEmail.toLowerCase().trim());
+            .map((inv: any) => (inv.invited_email || inv.invitedEmail || "").toLowerCase().trim());
           setServerPendingEmails(pending);
+
+          const invList = data.invitations as any[];
+          const extraMembers: TaskMember[] = [];
+
+          // 1. Dapatkan Ketua Kolaborasi dari baris undangan (utamakan task-base-)
+          const baseRow =
+            invList.find((inv: any) => inv.id?.startsWith("task-base-")) ||
+            invList.find((inv: any) => inv.invited_by || inv.inviter_name) ||
+            invList[0];
+          if (baseRow) {
+            const ownerId = (baseRow.invited_by || baseRow.invitedBy || task.createdBy || "").trim();
+            const ownerName = (baseRow.inviter_name || baseRow.inviterName || "").trim() || "Ketua Kolaborasi";
+            const ownerAvatar = baseRow.inviter_avatar || baseRow.inviterAvatar;
+            const ownerBaseEmail = (baseRow.id?.startsWith("task-base-") ? baseRow.invited_email : "") || "";
+
+            const matchedOwnerStudent = registeredStudents.find(
+              (s) =>
+                (ownerId && s.id?.toLowerCase() === ownerId.toLowerCase()) ||
+                (ownerBaseEmail && s.email?.toLowerCase().trim() === ownerBaseEmail.toLowerCase().trim()) ||
+                (ownerName && s.fullName?.toLowerCase().trim() === ownerName.toLowerCase().trim())
+            );
+
+            extraMembers.push({
+              userId: matchedOwnerStudent?.id || ownerId || "owner-task",
+              taskId: task.id,
+              fullName: matchedOwnerStudent?.fullName || ownerName,
+              avatarUrl: matchedOwnerStudent?.avatarUrl || ownerAvatar,
+              role: "owner",
+              joinedAt: baseRow.created_at || baseRow.createdAt || new Date().toISOString(),
+            });
+          }
+
+          // 2. Dapatkan seluruh Anggota yang sudah menerima (accepted)
+          const acceptedInvs = invList.filter((inv) => inv.status === "accepted" && !inv.id.startsWith("task-base-"));
+          for (const aInv of acceptedInvs) {
+            const cleanTargetEmail = (aInv.invited_email || aInv.invitedEmail || "").toLowerCase().trim();
+            const s = registeredStudents.find((st) => st.email.toLowerCase().trim() === cleanTargetEmail);
+            extraMembers.push({
+              userId: s?.id || cleanTargetEmail,
+              taskId: task.id,
+              fullName: s?.fullName || cleanTargetEmail.split("@")[0],
+              avatarUrl: s?.avatarUrl,
+              role: "member",
+              joinedAt: aInv.created_at || aInv.createdAt || new Date().toISOString(),
+            });
+          }
+
+          setServerMembers(extraMembers);
         }
       })
       .catch(() => {});
@@ -251,14 +301,14 @@ export function InviteMemberModal({
 
   const currentMembers = useMemo(() => {
     if (!task) return [];
-    const raw = task.members || [];
-    const cleaned = cleanAndDeduplicateMembers(raw, registeredStudents);
+    const source = [...(task.members || []), ...serverMembers];
+    const cleaned = cleanAndDeduplicateMembers(source, registeredStudents);
     return cleaned.sort((a, b) => {
       if (a.role === "owner") return -1;
       if (b.role === "owner") return 1;
       return a.fullName.localeCompare(b.fullName);
     });
-  }, [task?.members, registeredStudents]);
+  }, [task?.members, serverMembers, registeredStudents]);
 
   const getStudentInfo = (m: TaskMember) => {
     const rawUserId = (m.userId || "").toLowerCase().trim();
@@ -357,7 +407,7 @@ export function InviteMemberModal({
             <Users className="w-5 h-5" />
           </div>
           <h2 className="text-xl font-bold text-[#1E1B4B]">
-            {isOwner ? "Kolaborasi Tugas Kelompok" : "Anggota Kolaborasi Tugas"}
+            {isOwner ? "Kolaborasi Tugas Kelompok" : "Daftar Anggota & Ketua Kolaborasi"}
           </h2>
           <p className="text-xs text-gray-500 mt-0.5 line-clamp-1">
             {task.title}
@@ -365,17 +415,19 @@ export function InviteMemberModal({
         </div>
 
         {!isOwner && (
-          <div className="mb-5 p-3.5 rounded-2xl bg-gradient-to-r from-purple-50/90 to-indigo-50/90 border border-purple-100 flex items-start gap-3">
-            <div className="w-8 h-8 rounded-xl bg-purple-100 flex items-center justify-center text-purple-600 shrink-0 mt-0.5">
-              <Users className="w-4 h-4" />
+          <div className="mb-5 p-4 rounded-2xl bg-gradient-to-r from-purple-50/90 to-indigo-50/90 border border-purple-100 flex items-start gap-3.5 shadow-2xs">
+            <div className="w-9 h-9 rounded-xl bg-purple-100 flex items-center justify-center text-purple-600 shrink-0 mt-0.5 shadow-2xs">
+              <Users className="w-4.5 h-4.5" />
             </div>
             <div className="text-left text-xs text-purple-950">
-              <p className="font-bold flex items-center gap-1.5">
-                <span>Kolaborasi Tugas Kelompok</span>
-                <span className="text-[10px] bg-purple-200/80 text-purple-800 font-extrabold px-2 py-0.5 rounded-lg">Anggota</span>
-              </p>
+              <div className="font-bold flex items-center gap-2">
+                <span>Anggota Kelompok &amp; Ketua Kolaborasi</span>
+                <span className="text-[10px] bg-purple-200/90 text-purple-800 font-extrabold px-2 py-0.5 rounded-lg">
+                  Tergabung
+                </span>
+              </div>
               <p className="text-[11px] text-purple-700 mt-1 leading-relaxed">
-                Berikut adalah daftar seluruh rekan mahasiswa yang tergabung dalam pengerjaan tugas kelompok ini.
+                Berikut adalah daftar seluruh rekan mahasiswa yang tergabung dalam pengerjaan tugas kelompok ini, termasuk Ketua Kolaborasi dan rekan anggota lainnya.
               </p>
             </div>
           </div>
@@ -542,8 +594,9 @@ export function InviteMemberModal({
         {/* 3. Daftar Anggota Kelompok (Dapat Dilihat Oleh Semua Anggota & Ketua) */}
         <div>
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-xs font-extrabold uppercase tracking-wider text-gray-700">
-              {isOwner ? "Anggota Aktif Saat Ini" : "Daftar Anggota Kelompok"} ({currentMembers.length})
+            <h3 className="text-xs font-extrabold uppercase tracking-wider text-gray-700 flex items-center gap-1.5">
+              <Users className="w-3.5 h-3.5 text-purple-600" />
+              <span>{isOwner ? "Daftar Anggota & Ketua Kelompok" : "Daftar Anggota Lainnya Termasuk Ketua"} ({currentMembers.length})</span>
             </h3>
             <span className="text-[11px] text-gray-400 font-medium">
               {currentMembers.filter((m) => m.role === "owner").length > 0 ? "1 Ketua • " : ""}
@@ -591,12 +644,12 @@ export function InviteMemberModal({
 
                     <div className="flex items-center gap-2 shrink-0">
                       {m.role === "owner" ? (
-                        <span className="px-2.5 py-1 rounded-xl bg-amber-50 text-amber-800 text-[10px] font-black border border-amber-200/70 shrink-0">
-                          Ketua Kelompok
+                        <span className="px-2.5 py-1 rounded-xl bg-amber-100/90 text-amber-900 text-[10px] font-black border border-amber-300 flex items-center gap-1 shadow-2xs shrink-0">
+                          <span>👑 Ketua Kolaborasi</span>
                         </span>
                       ) : (
-                        <span className="px-2.5 py-1 rounded-xl bg-indigo-50 text-indigo-700 text-[10px] font-bold border border-indigo-200/60 shrink-0">
-                          Anggota
+                        <span className="px-2.5 py-1 rounded-xl bg-indigo-50 text-indigo-700 text-[10px] font-bold border border-indigo-200/60 flex items-center gap-1 shadow-2xs shrink-0">
+                          <span>Anggota</span>
                         </span>
                       )}
 
