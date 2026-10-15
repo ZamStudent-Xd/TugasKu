@@ -49,6 +49,7 @@ import {
   addMemberToTask,
   removeMemberFromTask,
   getCurrentUser,
+  saveCurrentUser,
   getActiveSessionUser,
   updateUserProfile,
   logoutStudent,
@@ -292,10 +293,27 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
           table: "collaboration_invitations",
           filter: `invited_email=eq.${cleanEmail}`,
         },
-        async (payload) => {
+        async (payload: any) => {
+          if (
+            payload.new?.task_id === "PROFILE_RECORD" ||
+            payload.new?.id === `profile-record-${cleanEmail}`
+          ) {
+            const newAvatar = payload.new?.inviter_avatar || payload.new?.task_payload?.avatarUrl;
+            if (newAvatar) {
+              setUser((prev) => (prev ? { ...prev, avatarUrl: newAvatar } : null));
+              const cur = getCurrentUser();
+              if (cur) {
+                saveCurrentUser({ ...cur, avatarUrl: newAvatar });
+              }
+            }
+          }
           const fresh = await fetchTaskInvitations(cleanEmail);
           setInvitations(fresh);
-          if (payload.eventType === "INSERT") {
+          if (
+            payload.eventType === "INSERT" &&
+            !payload.new?.id?.startsWith("profile-") &&
+            !payload.new?.id?.startsWith("course-")
+          ) {
             addToast("info", "📩 Anda menerima undangan kolaborasi tugas kelompok baru!");
           }
         }

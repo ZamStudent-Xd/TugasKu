@@ -17,7 +17,7 @@ import {
 import { UserProfile } from "@/types";
 
 // Helper untuk kompresi dan resize gambar agar aman, cepat, dan ringan
-function compressImage(file: File, maxWidth = 240, maxHeight = 240, quality = 0.8): Promise<string> {
+function compressImage(file: File, maxWidth = 200, maxHeight = 200, quality = 0.75): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.readAsDataURL(file);

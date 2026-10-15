@@ -2365,6 +2365,35 @@ export async function getActiveSessionUser(): Promise<UserProfile | null> {
         return null;
       }
 
+      // 3. Ambil avatar dan profil realtime terbaru dari collaboration_invitations (PROFILE_RECORD)
+      // PROFILE_RECORD menjamin foto kustom (upload foto sendiri) selalu tersimpan persisten dan tidak pernah ter-reset saat tab ditutup
+      let currentAvatar = profile.avatar_url;
+      try {
+        const { data: profRecord } = await supabase
+          .from("collaboration_invitations")
+          .select("inviter_avatar, task_payload")
+          .eq("id", `profile-record-${cleanEmail}`)
+          .maybeSingle();
+
+        if (profRecord) {
+          const recAvatar = profRecord.inviter_avatar || (profRecord.task_payload as any)?.avatarUrl;
+          if (recAvatar) {
+            currentAvatar = recAvatar;
+          }
+        }
+      } catch {}
+
+      // Jika di localUser tersimpan avatar kustom yang valid, jangan pernah ditimpa oleh default dicebear lama dari profiles
+      if (localUser.avatarUrl && localUser.avatarUrl !== currentAvatar) {
+        const isLocalCustom = !localUser.avatarUrl.includes("dicebear");
+        const isCloudDefault = !currentAvatar || currentAvatar.includes("dicebear");
+        if (isLocalCustom && isCloudDefault) {
+          currentAvatar = localUser.avatarUrl;
+          // Sinkronkan ke cloud PROFILE_RECORD agar permanen
+          syncUserProfileToCloud({ ...localUser, avatarUrl: currentAvatar });
+        }
+      }
+
       // Akun masih sah dan aktif di database
       const userProfile: UserProfile = {
         ...localUser,
@@ -2378,7 +2407,7 @@ export async function getActiveSessionUser(): Promise<UserProfile | null> {
         major: profile.major || localUser.major,
         semester: profile.semester || localUser.semester,
         campus: profile.campus || localUser.campus,
-        avatarUrl: profile.avatar_url || localUser.avatarUrl,
+        avatarUrl: currentAvatar || localUser.avatarUrl,
         createdAt: profile.created_at || localUser.createdAt,
       };
 
@@ -2566,8 +2595,21 @@ export async function updateUserProfile(updates: Partial<UserProfile>): Promise<
         })
         .eq("invited_by", updated.id || cleanEmail);
 
-      // Coba update juga tabel profiles jika diizinkan RLS
+      // Coba update juga tabel profiles jika diizinkan RLS (baik by id maupun by email)
       try {
+        if (updated.id) {
+          await supabase
+            .from("profiles")
+            .update({
+              full_name: updated.fullName,
+              nim: updated.nim,
+              major: updated.major,
+              semester: updated.semester,
+              campus: updated.campus,
+              avatar_url: updated.avatarUrl,
+            })
+            .eq("id", updated.id);
+        }
         await supabase
           .from("profiles")
           .update({
@@ -2579,7 +2621,9 @@ export async function updateUserProfile(updates: Partial<UserProfile>): Promise<
             avatar_url: updated.avatarUrl,
           })
           .eq("email", cleanEmail);
-      } catch {}
+      } catch (e) {
+        console.warn("Update profiles table note:", e);
+      }
 
       // Update auth user metadata jika ada session aktif
       try {
@@ -2659,6 +2703,22 @@ export async function loginStudent(
           avatarUrl: profileRow.avatar_url,
           createdAt: profileRow.created_at,
         };
+
+        // Ambil avatar kustom dari PROFILE_RECORD jika tersedia
+        try {
+          const { data: profRec } = await supabase
+            .from("collaboration_invitations")
+            .select("inviter_avatar, task_payload")
+            .eq("id", `profile-record-${cleanEmail}`)
+            .maybeSingle();
+
+          if (profRec) {
+            const recAvatar = profRec.inviter_avatar || (profRec.task_payload as any)?.avatarUrl;
+            if (recAvatar) {
+              cloudFoundProfile.avatarUrl = recAvatar;
+            }
+          }
+        } catch {}
       }
     } catch (err) {
       console.warn("Supabase profile check note:", err);
