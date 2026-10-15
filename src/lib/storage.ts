@@ -132,7 +132,26 @@ function getLocalTasks(): Task[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = localStorage.getItem(TASKS_KEY);
-    return raw ? syncTasksWithAutoPoints(JSON.parse(raw)) : [];
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    // Filter dan bersihkan tugas anomali (tugas tanpa judul atau record profil/matakuliah)
+    const valid = parsed.filter(
+      (t) =>
+        t &&
+        typeof t === "object" &&
+        t.title &&
+        typeof t.title === "string" &&
+        t.title.trim() !== "" &&
+        !t.id?.startsWith("course-") &&
+        !t.id?.startsWith("profile-") &&
+        (t as any).task_id !== "COURSE_RECORD" &&
+        (t as any).task_id !== "PROFILE_RECORD"
+    );
+    if (valid.length !== parsed.length) {
+      localStorage.setItem(TASKS_KEY, JSON.stringify(valid));
+    }
+    return syncTasksWithAutoPoints(valid);
   } catch {
     return [];
   }
@@ -459,6 +478,11 @@ export async function fetchCourses(userParam?: UserProfile | null): Promise<Cour
 
           const isMember =
             (cleanEmail && rowInvitedEmail === cleanEmail && row.status === "accepted");
+
+          // Abaikan record profil
+          if (row.task_id === "PROFILE_RECORD" || row.id.startsWith("profile-")) {
+            continue;
+          }
 
           // Jika ini adalah record mata kuliah tersimpan (COURSE_RECORD)
           if (row.task_id === "COURSE_RECORD") {
@@ -797,7 +821,14 @@ export async function deleteCourse(
             rowCourseId === id ||
             (rowCourseId && id && (rowCourseId.includes(id) || id.includes(rowCourseId)));
 
-          if (isMatchCourse && row.task_id) {
+          if (
+            isMatchCourse &&
+            row.task_id &&
+            row.task_id !== "COURSE_RECORD" &&
+            row.task_id !== "PROFILE_RECORD" &&
+            !row.id.startsWith("course-") &&
+            !row.id.startsWith("profile-")
+          ) {
             const rowInvitedEmail = (row.invited_email || "").toLowerCase().trim();
             const isUserRow =
               (email && rowInvitedEmail === email) ||
@@ -855,11 +886,29 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
         supabaseFetchSuccess = true;
         rawCollabRows = collabRows;
         for (const row of collabRows) {
-          if (row.task_payload) {
-            const t = row.task_payload as Task;
-            if (deletedTaskIds.has(t.id)) {
-              continue;
-            }
+          // ABAIKAN RECORD NON-TUGAS: COURSE_RECORD dan PROFILE_RECORD BUKAN TUGAS!
+          if (
+            !row.task_payload ||
+            row.task_id === "COURSE_RECORD" ||
+            row.task_id === "PROFILE_RECORD" ||
+            row.id.startsWith("course-") ||
+            row.id.startsWith("profile-")
+          ) {
+            continue;
+          }
+
+          const t = row.task_payload as Task;
+          if (
+            !t ||
+            !t.title ||
+            typeof t.title !== "string" ||
+            t.title.trim() === "" ||
+            t.id?.startsWith("course-") ||
+            t.id?.startsWith("profile-") ||
+            deletedTaskIds.has(t.id)
+          ) {
+            continue;
+          }
             const rowInvitedEmail = (row.invited_email || "").toLowerCase().trim();
             const rowInvitedBy = (row.invited_by || "").toLowerCase().trim();
             const rowInviterName = (row.inviter_name || "").toLowerCase().trim();
@@ -979,7 +1028,6 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
                 });
               }
             }
-          }
         }
       }
     } catch (err) {
@@ -1000,7 +1048,16 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
         const json = await res.json();
         if (json.success && Array.isArray(json.tasks) && json.tasks.length > 0) {
           for (const t of json.tasks) {
-            if (!deletedTaskIds.has(t.id) && !tasksMap.has(t.id)) {
+            if (
+              t &&
+              t.title &&
+              typeof t.title === "string" &&
+              t.title.trim() !== "" &&
+              !t.id?.startsWith("course-") &&
+              !t.id?.startsWith("profile-") &&
+              !deletedTaskIds.has(t.id) &&
+              !tasksMap.has(t.id)
+            ) {
               t.members = cleanAndDeduplicateMembers(t.members || [], allStudents);
               tasksMap.set(t.id, t);
             }
@@ -1015,7 +1072,17 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
   // 3. Gabungkan dengan penyimpanan lokal pengguna (Hanya pertahankan tugas yang masih valid)
   const local = getLocalTasks();
   for (const t of local) {
-    if (deletedTaskIds.has(t.id)) continue;
+    if (
+      !t ||
+      !t.title ||
+      typeof t.title !== "string" ||
+      t.title.trim() === "" ||
+      t.id?.startsWith("course-") ||
+      t.id?.startsWith("profile-") ||
+      deletedTaskIds.has(t.id)
+    ) {
+      continue;
+    }
     if (!tasksMap.has(t.id)) {
       // Jika tugas kelompok dan fetch Supabase berhasil:
       // Jika tugas kelompok tersebut tidak ada di Supabase, berarti tugas telah dihapus atau pengguna bukan anggota!
@@ -1091,7 +1158,16 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
   }
 
   const rawTasks = Array.from(tasksMap.values())
-    .filter((t) => !deletedTaskIds.has(t.id))
+    .filter(
+      (t) =>
+        t &&
+        t.title &&
+        typeof t.title === "string" &&
+        t.title.trim() !== "" &&
+        !deletedTaskIds.has(t.id) &&
+        !t.id?.startsWith("course-") &&
+        !t.id?.startsWith("profile-")
+    )
     .map((t) => ({
       ...t,
       members: cleanAndDeduplicateMembers(t.members || [], allStudents),
@@ -1607,6 +1683,17 @@ export async function fetchTaskInvitations(currentUserEmail?: string): Promise<T
 
       if (!error && Array.isArray(data)) {
         for (const row of data) {
+          // Hanya ambil undangan tugas kolaborasi asli (abaikan record non-undangan)
+          if (
+            row.task_id === "COURSE_RECORD" ||
+            row.task_id === "PROFILE_RECORD" ||
+            row.id.startsWith("course-") ||
+            row.id.startsWith("profile-") ||
+            row.id.startsWith("task-base-") ||
+            !row.task_title
+          ) {
+            continue;
+          }
           const inv: TaskInvitation = {
             id: row.id,
             taskId: row.task_id,

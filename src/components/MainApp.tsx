@@ -493,7 +493,9 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
   // Koleksi tugas yang cocok dengan pencarian
   const matchingTasks = useMemo(() => {
     if (!normalizedQuery) return [];
-    return tasks.filter(isTaskMatching);
+    return tasks
+      .filter((t) => t && t.title && typeof t.title === "string" && t.title.trim() !== "" && !t.id?.startsWith("course-") && !t.id?.startsWith("profile-"))
+      .filter(isTaskMatching);
   }, [tasks, courses, normalizedQuery]);
 
   // Koleksi mata kuliah yang cocok dengan pencarian
@@ -504,7 +506,7 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
 
   // Filter and Sort Tasks for Dashboard
   const filteredDashboardTasks = useMemo(() => {
-    let result = [...tasks];
+    let result = tasks.filter((t) => t && t.title && typeof t.title === "string" && t.title.trim() !== "" && !t.id?.startsWith("course-") && !t.id?.startsWith("profile-"));
 
     if (statusFilter !== "all") {
       result = result.filter((t) => getTaskStatus(t) === statusFilter);
@@ -569,7 +571,8 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
 
   // Calendar timeline tasks
   const agendaTasks = useMemo(() => {
-    const activeTasks = normalizedQuery ? tasks.filter(isTaskMatching) : tasks;
+    const valid = tasks.filter((t) => t && t.title && typeof t.title === "string" && t.title.trim() !== "" && !t.id?.startsWith("course-") && !t.id?.startsWith("profile-"));
+    const activeTasks = normalizedQuery ? valid.filter(isTaskMatching) : valid;
     const withDeadline = activeTasks
       .filter((t) => t.deadline)
       .sort((a, b) => new Date(a.deadline!).getTime() - new Date(b.deadline!).getTime());
@@ -1438,7 +1441,7 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
                     );
                   }
 
-                  const courseTasks = tasks.filter((t) => isTaskBelongsToCourse(t, currentCourse));
+                  const courseTasks = tasks.filter((t) => t && t.title && typeof t.title === "string" && t.title.trim() !== "" && !t.id?.startsWith("course-") && !t.id?.startsWith("profile-") && isTaskBelongsToCourse(t, currentCourse));
                   const indivTasks = courseTasks.filter((t) => t.taskType === "individual");
                   const groupTasksForCourse = courseTasks.filter((t) => t.taskType === "group");
                   const stats = calculateCourseProgress(tasks, currentCourse);

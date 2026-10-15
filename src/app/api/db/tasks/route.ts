@@ -43,6 +43,9 @@ export async function GET(request: NextRequest) {
       });
     }
 
+    // Pastikan hanya tugas valid yang memiliki judul dan bukan record lain
+    tasks = tasks.filter((t) => t && t.title && typeof t.title === "string" && t.title.trim() !== "" && !t.id?.startsWith("course-") && !t.id?.startsWith("profile-"));
+
     // Pastikan seluruh tugas memiliki courseName untuk pencocokan lintas pengguna
     tasks = tasks.map((t) => {
       if (t.courseName) return t;
