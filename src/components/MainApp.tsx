@@ -59,7 +59,7 @@ import {
   declineTaskInvitation,
   sendTaskInvitation,
   getAllRegisteredStudents,
-  syncUserProfileToCloud,
+  checkIsTaskOwner,
 } from "@/lib/storage";
 import { isSupabaseConfigured, supabase } from "@/lib/supabaseClient";
 
@@ -179,7 +179,7 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
   // Delete confirm modal state
   const [deleteModalState, setDeleteModalState] = useState<{
     isOpen: boolean;
-    type: "course" | "task";
+    type: "course" | "task" | "leave_task";
     id: string;
     title: string;
     description: string;
@@ -297,13 +297,6 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
       client.removeChannel(channel);
     };
   }, [user?.email]);
-
-  // Pastikan profil & foto avatar pengguna aktif tersinkronisasi ke cloud (PROFILE_RECORD)
-  useEffect(() => {
-    if (user?.email) {
-      syncUserProfileToCloud(user);
-    }
-  }, [user?.email, user?.avatarUrl, user?.fullName]);
 
   const handleUpdateProfile = async (updated: UserProfile) => {
     const saved = await updateUserProfile(updated);
@@ -680,15 +673,8 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
 
   const handleOpenEditTask = (target: Task) => {
     if (target.taskType === "group") {
-      const cleanCurrent = (user?.id || user?.email || "").toLowerCase().trim();
-      const isCreator = target.createdBy && target.createdBy.toLowerCase().trim() === cleanCurrent;
-      const isOwnerMember = target.members?.some(
-        (m) =>
-          ((m.userId && m.userId.toLowerCase().trim() === cleanCurrent) ||
-            (m.email && m.email.toLowerCase().trim() === cleanCurrent)) &&
-          m.role === "owner"
-      );
-      if (!isCreator && !isOwnerMember) {
+      const isOwner = checkIsTaskOwner(target, user);
+      if (!isOwner) {
         addToast("info", "Sebagai anggota kolaborasi, Anda hanya dapat mengubah progres tugas.");
         return;
       }
@@ -698,15 +684,8 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
 
   const handleOpenInvite = (target: Task) => {
     if (target.taskType === "group") {
-      const cleanCurrent = (user?.id || user?.email || "").toLowerCase().trim();
-      const isCreator = target.createdBy && target.createdBy.toLowerCase().trim() === cleanCurrent;
-      const isOwnerMember = target.members?.some(
-        (m) =>
-          ((m.userId && m.userId.toLowerCase().trim() === cleanCurrent) ||
-            (m.email && m.email.toLowerCase().trim() === cleanCurrent)) &&
-          m.role === "owner"
-      );
-      if (!isCreator && !isOwnerMember) {
+      const isOwner = checkIsTaskOwner(target, user);
+      if (!isOwner) {
         addToast("info", "Hanya ketua kolaborasi yang dapat mengundang anggota.");
         return;
       }
@@ -716,26 +695,29 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
 
   const handleDeleteTaskConfirm = (id: string) => {
     const target = tasks.find((t) => t.id === id);
-    if (target && target.taskType === "group") {
-      const cleanCurrent = (user?.id || user?.email || "").toLowerCase().trim();
-      const isCreator = target.createdBy && target.createdBy.toLowerCase().trim() === cleanCurrent;
-      const isOwnerMember = target.members?.some(
-        (m) =>
-          ((m.userId && m.userId.toLowerCase().trim() === cleanCurrent) ||
-            (m.email && m.email.toLowerCase().trim() === cleanCurrent)) &&
-          m.role === "owner"
-      );
-      if (!isCreator && !isOwnerMember) {
-        addToast("error", "Sebagai anggota kolaborasi, Anda hanya dapat mengubah progres tugas.");
+    if (!target) return;
+
+    if (target.taskType === "group") {
+      const isOwner = checkIsTaskOwner(target, user);
+      if (!isOwner) {
+        setDeleteModalState({
+          isOpen: true,
+          type: "leave_task",
+          id,
+          title: "Keluar dari Tugas Kolaborasi?",
+          description: `Apakah Anda yakin ingin keluar dan melepas tugas "${target.title}" dari akun Anda? Tugas akan tetap aman di ketua kolaborasi.`,
+          confirmLabel: "Ya, Keluar dari Tugas",
+        });
         return;
       }
     }
+
     setDeleteModalState({
       isOpen: true,
       type: "task",
       id,
       title: "Hapus Tugas Ini?",
-      description: `Apakah kamu yakin ingin menghapus tugas "${target?.title || "ini"}"? Tindakan ini tidak dapat dibatalkan.`,
+      description: `Apakah kamu yakin ingin menghapus tugas "${target.title}"? Tindakan ini tidak dapat dibatalkan.`,
       confirmLabel: "Hapus Sekarang",
     });
   };
@@ -781,14 +763,8 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
     // Periksa apakah ada tugas kolaborasi di mana pengguna saat ini adalah anggota (bukan ketua)
     const hasCollaborativeTaskAsMember = linkedTasks.some((t) => {
       if (t.taskType !== "group") return false;
-      const isCreator = t.createdBy && t.createdBy.toLowerCase().trim() === cleanCurrent;
-      const isOwnerMember = t.members?.some(
-        (m) =>
-          ((m.userId && m.userId.toLowerCase().trim() === cleanCurrent) ||
-            (m.email && m.email.toLowerCase().trim() === cleanCurrent)) &&
-          m.role === "owner"
-      );
-      return !isCreator && !isOwnerMember;
+      const isOwner = checkIsTaskOwner(t, user);
+      return !isOwner;
     });
 
     if (hasCollaborativeTaskAsMember) {
@@ -822,6 +798,16 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
         addToast("success", "Tugas berhasil dihapus.");
       } catch {
         addToast("error", "Gagal menghapus tugas");
+      }
+    } else if (type === "leave_task") {
+      try {
+        if (user) {
+          const remaining = await removeMemberFromTask(id, user.id || user.email, user);
+          setTasks(remaining);
+          addToast("success", "Anda telah keluar dari tugas kolaborasi.");
+        }
+      } catch {
+        addToast("error", "Gagal keluar dari tugas kolaborasi");
       }
     } else if (type === "course") {
       try {
@@ -1046,6 +1032,7 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
                           task={task}
                           course={courses.find((c) => isTaskBelongsToCourse(task, c))}
                           currentUserId={user?.id || user?.email}
+                          currentUser={user}
                           onUpdateProgress={handleUpdateProgress}
                           onEdit={handleOpenEditTask}
                           onDelete={handleDeleteTaskConfirm}
@@ -1639,6 +1626,7 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
                               task={task}
                               course={currentCourse}
                               currentUserId={user?.id || user?.email}
+                              currentUser={user}
                               onUpdateProgress={handleUpdateProgress}
                               onEdit={handleOpenEditTask}
                               onDelete={handleDeleteTaskConfirm}
@@ -1841,6 +1829,7 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
                             task={task}
                             course={courses.find((c) => isTaskBelongsToCourse(task, c))}
                             currentUserId={user?.id || user?.email}
+                            currentUser={user}
                             onUpdateProgress={handleUpdateProgress}
                             onEdit={handleOpenEditTask}
                             onDelete={handleDeleteTaskConfirm}
@@ -1865,6 +1854,7 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
                             task={task}
                             course={courses.find((c) => isTaskBelongsToCourse(task, c))}
                             currentUserId={user?.id || user?.email}
+                            currentUser={user}
                             onUpdateProgress={handleUpdateProgress}
                             onEdit={handleOpenEditTask}
                             onDelete={handleDeleteTaskConfirm}
@@ -1889,6 +1879,7 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
                             task={task}
                             course={courses.find((c) => isTaskBelongsToCourse(task, c))}
                             currentUserId={user?.id || user?.email}
+                            currentUser={user}
                             onUpdateProgress={handleUpdateProgress}
                             onEdit={handleOpenEditTask}
                             onDelete={handleDeleteTaskConfirm}
@@ -1912,6 +1903,7 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
                             task={task}
                             course={courses.find((c) => isTaskBelongsToCourse(task, c))}
                             currentUserId={user?.id || user?.email}
+                            currentUser={user}
                             onUpdateProgress={handleUpdateProgress}
                             onEdit={handleOpenEditTask}
                             onDelete={handleDeleteTaskConfirm}

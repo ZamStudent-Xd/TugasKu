@@ -144,6 +144,76 @@ function saveLocalTasks(tasks: Task[]) {
   }
 }
 
+const DELETED_TASKS_KEY = "tugasku_deleted_task_ids_v1";
+
+export function getDeletedTaskIds(): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = localStorage.getItem(DELETED_TASKS_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return new Set(Array.isArray(parsed) ? parsed : []);
+  } catch {
+    return new Set();
+  }
+}
+
+export function recordDeletedTaskId(id: string): void {
+  if (typeof window === "undefined" || !id) return;
+  try {
+    const current = getDeletedTaskIds();
+    current.add(id);
+    localStorage.setItem(DELETED_TASKS_KEY, JSON.stringify(Array.from(current).slice(-200)));
+  } catch {}
+}
+
+/**
+ * Mengecek apakah pengguna saat ini adalah pemilik / pembuat tugas kelompok atau tugas individu.
+ * Mencocokkan ID, email, NIM, dan role "owner" pada daftar anggota tugas.
+ */
+export function checkIsTaskOwner(task: Task, user?: UserProfile | null): boolean {
+  if (!user) return false;
+  if (task.taskType !== "group") return true;
+
+  const userIds = [
+    user.id?.toLowerCase().trim(),
+    user.email?.toLowerCase().trim(),
+    user.nim?.toLowerCase().trim(),
+    user.fullName?.toLowerCase().trim(),
+  ].filter(Boolean) as string[];
+
+  const taskCreator = (task.createdBy || "").toLowerCase().trim();
+  if (taskCreator && userIds.some((uid) => uid === taskCreator || taskCreator.includes(uid) || uid.includes(taskCreator))) {
+    return true;
+  }
+
+  // Cek apakah user memiliki member role === "owner"
+  if (task.members && task.members.length > 0) {
+    const isOwnerMember = task.members.some((m) => {
+      if (m.role !== "owner") return false;
+      const mUser = (m.userId || "").toLowerCase().trim();
+      const mName = (m.fullName || "").toLowerCase().trim();
+      const mEmail = ((m as any).email || "").toLowerCase().trim();
+      return userIds.some(
+        (uid) =>
+          uid === mUser ||
+          uid === mName ||
+          uid === mEmail ||
+          (user.nim && (mName.includes(user.nim.toLowerCase().trim()) || mUser.includes(user.nim.toLowerCase().trim())))
+      );
+    });
+    if (isOwnerMember) return true;
+  }
+
+  // Fallback: Jika tugas tidak memiliki createdBy atau anggota kosong, anggap user pemegang adalah pemilik
+  if (!task.createdBy && (!task.members || task.members.length === 0)) {
+    return true;
+  }
+
+  return false;
+}
+
+
 /**
  * Membersihkan dan mendeduplikasi daftar anggota tugas kelompok (TaskMember[]).
  * - Menghilangkan data duplikat yang hanya berisi NIM (misal "19251525") jika sudah ada nama asli mahasiswa.
@@ -431,7 +501,8 @@ export async function fetchCourses(userParam?: UserProfile | null): Promise<Cour
   }
 
   // 5. Pastikan mata kuliah dari tugas kolaborasi lokal otomatis tersedia jika belum ada
-  const currentTasks = getLocalTasks();
+  const deletedTaskIds = getDeletedTaskIds();
+  const currentTasks = getLocalTasks().filter((t) => !deletedTaskIds.has(t.id));
   for (const t of currentTasks) {
     if (t.courseName) {
       const cleanCourseName = t.courseName.trim().toLowerCase();
@@ -689,10 +760,7 @@ export async function deleteCourse(
       continue;
     }
 
-    const cleanCreator = (t.createdBy || "").toLowerCase().trim();
-    const isOwner =
-      (userId && cleanCreator === userId.toLowerCase().trim()) ||
-      (email && cleanCreator === email);
+    const isOwner = checkIsTaskOwner(t, activeUser);
 
     if (t.taskType === "group" && !isOwner) {
       // ANGGOTA MENGHAPUS MATA KULIAH TUGAS KELOMPOK:
@@ -774,7 +842,9 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
   }
 
   // 1. Ambil tugas kolaborasi cloud dari Supabase (collaboration_invitations)
+  const deletedTaskIds = getDeletedTaskIds();
   let rawCollabRows: any[] = [];
+  let supabaseFetchSuccess = false;
   if (isSupabaseConfigured && supabase && (userId || cleanEmail)) {
     try {
       const { data: collabRows, error: collabErr } = await supabase
@@ -782,10 +852,14 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
         .select("*");
 
       if (!collabErr && Array.isArray(collabRows)) {
+        supabaseFetchSuccess = true;
         rawCollabRows = collabRows;
         for (const row of collabRows) {
           if (row.task_payload) {
             const t = row.task_payload as Task;
+            if (deletedTaskIds.has(t.id)) {
+              continue;
+            }
             const rowInvitedEmail = (row.invited_email || "").toLowerCase().trim();
             const rowInvitedBy = (row.invited_by || "").toLowerCase().trim();
             const rowInviterName = (row.inviter_name || "").toLowerCase().trim();
@@ -926,7 +1000,7 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
         const json = await res.json();
         if (json.success && Array.isArray(json.tasks) && json.tasks.length > 0) {
           for (const t of json.tasks) {
-            if (!tasksMap.has(t.id)) {
+            if (!deletedTaskIds.has(t.id) && !tasksMap.has(t.id)) {
               t.members = cleanAndDeduplicateMembers(t.members || [], allStudents);
               tasksMap.set(t.id, t);
             }
@@ -941,11 +1015,17 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
   // 3. Gabungkan dengan penyimpanan lokal pengguna (Hanya pertahankan tugas yang masih valid)
   const local = getLocalTasks();
   for (const t of local) {
+    if (deletedTaskIds.has(t.id)) continue;
     if (!tasksMap.has(t.id)) {
+      // Jika tugas kelompok dan fetch Supabase berhasil:
+      // Jika tugas kelompok tersebut tidak ada di Supabase, berarti tugas telah dihapus atau pengguna bukan anggota!
+      // JANGAN masukkan kembali ke tasksMap dan JANGAN upload kembali ke Supabase!
+      if (t.taskType === "group" && isSupabaseConfigured && supabaseFetchSuccess) {
+        continue;
+      }
+
       if (activeUser) {
-        const isOwner =
-          t.createdBy === activeUser.id ||
-          (t.createdBy && t.createdBy.toLowerCase().trim() === cleanEmail);
+        const isOwner = checkIsTaskOwner(t, activeUser);
         if (isOwner) {
           // Jika Supabase aktif, saring anggota tugas kelompok terhadap undangan yang aktif di Supabase!
           if (isSupabaseConfigured && supabase) {
@@ -986,26 +1066,6 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
 
           t.members = cleanAndDeduplicateMembers(t.members || [], allStudents);
           tasksMap.set(t.id, t);
-
-          // Pulihkan baris dasar di Supabase jika sempat hilang
-          if (isSupabaseConfigured && supabase && !rawCollabRows.some((r) => r.id === `task-base-${t.id}`)) {
-            try {
-              supabase.from("collaboration_invitations").upsert({
-                id: `task-base-${t.id}`,
-                task_id: t.id,
-                task_title: t.title,
-                course_name: t.courseName || "",
-                invited_email: cleanEmail,
-                token_hash: `tk-${t.id.slice(-6)}`,
-                status: "accepted",
-                expires_at: new Date(Date.now() + 365 * 86400000).toISOString(),
-                invited_by: activeUser.id,
-                inviter_name: activeUser.fullName || "",
-                inviter_avatar: activeUser.avatarUrl || "",
-                task_payload: t,
-              }).then(() => {});
-            } catch {}
-          }
         } else {
           // Jika Supabase aktif, tugas kolaborasi yang tidak ada di cloud untuk user ini
           // berarti anggota ini telah dikeluarkan/dihapus oleh pemilik tugas, sehingga JANGAN masukkan kembali!
@@ -1030,10 +1090,12 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
     }
   }
 
-  const rawTasks = Array.from(tasksMap.values()).map((t) => ({
-    ...t,
-    members: cleanAndDeduplicateMembers(t.members || [], allStudents),
-  }));
+  const rawTasks = Array.from(tasksMap.values())
+    .filter((t) => !deletedTaskIds.has(t.id))
+    .map((t) => ({
+      ...t,
+      members: cleanAndDeduplicateMembers(t.members || [], allStudents),
+    }));
   const result = syncTasksWithAutoPoints(rawTasks);
   saveLocalTasks(result);
   return result;
@@ -1186,13 +1248,22 @@ export async function updateTaskProgress(id: string, progress: number): Promise<
 }
 
 export async function deleteTask(id: string): Promise<Task[]> {
+  recordDeletedTaskId(id);
+
   // 1. Hapus dari Supabase collaboration_invitations (semua record terkait taskId ini)
   if (isSupabaseConfigured && supabase) {
     try {
       await supabase
         .from("collaboration_invitations")
         .delete()
-        .eq("task_id", id);
+        .or(`task_id.eq.${id},id.eq.task-base-${id},id.eq.${id}`);
+
+      try {
+        await supabase
+          .from("tasks")
+          .delete()
+          .eq("id", id);
+      } catch {}
     } catch (err) {
       console.warn("Gagal menghapus tugas dari Supabase cloud:", err);
     }
@@ -1279,6 +1350,7 @@ export async function removeMemberFromTask(
   const cleanTarget = targetUserIdOrEmail.trim().toLowerCase();
   const tasks = getLocalTasks();
   const targetTask = tasks.find((t) => t.id === taskId);
+  const activeUser = userProfileHint || getCurrentUser();
 
   // Cari profil lengkap mahasiswa yang akan dikeluarkan (id UUID, email, nim, fullName)
   let targetId = userProfileHint?.id?.toLowerCase() || (cleanTarget.includes("@") ? "" : cleanTarget);
@@ -1445,18 +1517,37 @@ export async function removeMemberFromTask(
     }
   }
 
-  // 2. Perbarui penyimpanan lokal pembuat tugas
-  const updatedTasks = tasks.map((t) => {
-    if (t.id === taskId) {
-      const filteredMembers = (t.members || []).filter((m) => !isTargetMember(m));
-      return {
-        ...t,
-        members: cleanAndDeduplicateMembers(filteredMembers, allStudents),
-        updatedAt: new Date().toISOString(),
-      };
-    }
-    return t;
-  });
+  // 2. Perbarui penyimpanan lokal pembuat tugas atau buang tugas jika pemanggil adalah anggota yang keluar
+  const isSelfLeaving = activeUser && (
+    isTargetMember({
+      userId: activeUser.id,
+      fullName: activeUser.fullName,
+      email: activeUser.email,
+    } as any) ||
+    (cleanTarget && (
+      (activeUser.id && activeUser.id.toLowerCase() === cleanTarget) ||
+      (activeUser.email && activeUser.email.toLowerCase().trim() === cleanTarget) ||
+      (activeUser.nim && activeUser.nim.toLowerCase().trim() === cleanTarget)
+    ))
+  );
+
+  let updatedTasks: Task[];
+  if (isSelfLeaving) {
+    recordDeletedTaskId(taskId);
+    updatedTasks = tasks.filter((t) => t.id !== taskId);
+  } else {
+    updatedTasks = tasks.map((t) => {
+      if (t.id === taskId) {
+        const filteredMembers = (t.members || []).filter((m) => !isTargetMember(m));
+        return {
+          ...t,
+          members: cleanAndDeduplicateMembers(filteredMembers, allStudents),
+          updatedAt: new Date().toISOString(),
+        };
+      }
+      return t;
+    });
+  }
   saveLocalTasks(updatedTasks);
 
   // 3. Sinkronkan ke Server DB jika ada
@@ -1928,40 +2019,7 @@ export async function fetchRegisteredStudents(query?: string): Promise<UserProfi
   const list: UserProfile[] = [];
   const seenEmails = new Set<string>();
 
-  // 1. Ambil dari Supabase PROFILE_RECORD langsung jika terkonfigurasi (PRIORITAS 1: Avatar paling update & realtime)
-  if (isSupabaseConfigured && supabase) {
-    try {
-      const { data: profileRecords, error } = await supabase
-        .from("collaboration_invitations")
-        .select("*")
-        .eq("task_id", "PROFILE_RECORD");
-
-      if (!error && Array.isArray(profileRecords)) {
-        for (const row of profileRecords) {
-          const clean = row.invited_email?.toLowerCase().trim();
-          if (clean && !seenEmails.has(clean)) {
-            const p = (row.task_payload as UserProfile) || {};
-            list.push({
-              id: p.id || row.invited_by || `user-${clean}`,
-              fullName: p.fullName || row.inviter_name || row.task_title || clean.split("@")[0],
-              email: clean,
-              nim: p.nim || "",
-              major: p.major || "Teknologi Informasi",
-              semester: p.semester || 1,
-              campus: p.campus || "Universitas BSI (Bina Sarana Informatika)",
-              avatarUrl: p.avatarUrl || row.inviter_avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${clean}`,
-              createdAt: p.createdAt || row.created_at,
-            });
-            seenEmails.add(clean);
-          }
-        }
-      }
-    } catch (err) {
-      console.warn("[STORAGE] Supabase PROFILE_RECORD fetch note:", err);
-    }
-  }
-
-  // 1.2 Ambil dari Supabase Profiles langsung untuk mahasiswa yang belum memiliki PROFILE_RECORD
+  // 1. Ambil dari Supabase Profiles langsung jika terkonfigurasi
   if (isSupabaseConfigured && supabase) {
     try {
       let supaQuery = supabase.from("profiles").select("*");
@@ -2007,11 +2065,10 @@ export async function fetchRegisteredStudents(query?: string): Promise<UserProfi
             if (clean) {
               const existingIdx = list.findIndex((item) => item.email.toLowerCase().trim() === clean);
               if (existingIdx >= 0) {
-                // Perbarui avatar & data jika server memiliki avatarUrl yang lebih baru dan bukan bottts default
-                if (s.avatarUrl && (!s.avatarUrl.includes("dicebear") || !list[existingIdx].avatarUrl || list[existingIdx].avatarUrl.includes("dicebear"))) {
-                  list[existingIdx].avatarUrl = s.avatarUrl;
+                // Perbarui avatar & data jika server memiliki avatarUrl yang lebih baru
+                if (s.avatarUrl) {
+                  list[existingIdx] = { ...list[existingIdx], ...s };
                 }
-                if (s.fullName) list[existingIdx].fullName = s.fullName;
               } else {
                 list.push(s);
                 seenEmails.add(clean);
@@ -2032,33 +2089,25 @@ export async function fetchRegisteredStudents(query?: string): Promise<UserProfi
       const clean = acc.user.email.toLowerCase().trim();
       const cloudStudent = list.find((item) => item.email.toLowerCase().trim() === clean);
       if (cloudStudent) {
-        // Jika akun lokal punya foto kustom sedangkan cloud belum, prioritaskan foto kustom
-        if (acc.user.avatarUrl && !acc.user.avatarUrl.includes("dicebear") && (cloudStudent.avatarUrl?.includes("dicebear") || !cloudStudent.avatarUrl)) {
-          cloudStudent.avatarUrl = acc.user.avatarUrl;
-        } else if (cloudStudent.avatarUrl && acc.user.avatarUrl !== cloudStudent.avatarUrl) {
+        // Sinkronkan avatar cloud terbaru ke akun lokal
+        if (cloudStudent.avatarUrl && acc.user.avatarUrl !== cloudStudent.avatarUrl) {
           acc.user.avatarUrl = cloudStudent.avatarUrl;
           acc.user.fullName = cloudStudent.fullName;
         }
       } else if (!seenEmails.has(clean)) {
-        list.push(acc.user);
-        seenEmails.add(clean);
+        if (!query || query.trim() === "" ||
+            acc.user.fullName.toLowerCase().includes(query.toLowerCase()) ||
+            (acc.user.nim && acc.user.nim.toLowerCase().includes(query.toLowerCase())) ||
+            clean.includes(query.toLowerCase())) {
+          list.push(acc.user);
+          seenEmails.add(clean);
+        }
       }
     }
   }
   saveRegisteredAccounts(localAccounts);
 
-  let result = list;
-  if (query && query.trim()) {
-    const q = query.trim().toLowerCase();
-    result = list.filter(
-      (s) =>
-        s.fullName.toLowerCase().includes(q) ||
-        (s.nim && s.nim.toLowerCase().includes(q)) ||
-        s.email.toLowerCase().includes(q)
-    );
-  }
-
-  return result;
+  return list;
 }
 
 /**
@@ -2202,61 +2251,6 @@ export async function getActiveSessionUser(): Promise<UserProfile | null> {
   return getCurrentUser();
 }
 
-/**
- * Sinkronisasi profil mahasiswa ke cloud database secara komprehensif
- */
-export async function syncUserProfileToCloud(user: UserProfile): Promise<void> {
-  if (!user || !user.email) return;
-  const cleanEmail = user.email.toLowerCase().trim();
-
-  // 1. Direct upsert ke Supabase collaboration_invitations (PROFILE_RECORD)
-  // Ini bebas dari batasan RLS dan langsung memicu Supabase Realtime ke seluruh pengguna lain
-  if (isSupabaseConfigured && supabase) {
-    try {
-      await supabase.from("collaboration_invitations").upsert({
-        id: `profile-record-${cleanEmail}`,
-        task_id: "PROFILE_RECORD",
-        task_title: user.fullName,
-        course_name: null,
-        invited_email: cleanEmail,
-        token_hash: "profile",
-        status: "active",
-        expires_at: new Date(Date.now() + 365 * 86400000).toISOString(),
-        invited_by: user.id || cleanEmail,
-        inviter_name: user.fullName,
-        inviter_avatar: user.avatarUrl,
-        task_payload: {
-          ...user,
-          avatarUrl: user.avatarUrl,
-          updatedAt: new Date().toISOString(),
-        },
-      });
-
-      // Update juga avatar di baris tugas yang pernah di-invite oleh user ini
-      await supabase
-        .from("collaboration_invitations")
-        .update({
-          inviter_name: user.fullName,
-          inviter_avatar: user.avatarUrl,
-        })
-        .eq("invited_by", user.id || cleanEmail);
-    } catch (e) {
-      console.warn("[SYNC_PROFILE] Gagal sync PROFILE_RECORD ke Supabase:", e);
-    }
-  }
-
-  // 2. Sinkronkan ke Server Database via API route
-  if (typeof window !== "undefined") {
-    try {
-      fetch("/api/db/students", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user }),
-      }).catch(() => {});
-    } catch {}
-  }
-}
-
 export async function updateUserProfile(updates: Partial<UserProfile>): Promise<UserProfile> {
   const current = getCurrentUser();
   if (!current) {
@@ -2268,22 +2262,69 @@ export async function updateUserProfile(updates: Partial<UserProfile>): Promise<
   };
   const cleanEmail = updated.email.toLowerCase().trim();
 
-  // 1. Perbarui sesi & akun lokal seketika
-  saveCurrentUser(updated);
-
-  const accounts = getRegisteredAccounts();
-  const nextAccounts = accounts.map((acc) => {
-    if (acc.user.id === updated.id || acc.user.email.toLowerCase() === cleanEmail) {
-      return {
-        ...acc,
-        user: updated,
-      };
+  // 1. Sinkronkan ke Server DB via API route (await agar selesai sebelum fungsi kembali)
+  if (typeof window !== "undefined") {
+    try {
+      await fetch("/api/db/students", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user: updated }),
+      });
+    } catch (e) {
+      console.warn("Gagal simpan profil ke server DB:", e);
     }
-    return acc;
-  });
-  saveRegisteredAccounts(nextAccounts);
+  }
 
-  // 2. Perbarui avatar & nama di seluruh tugas lokal yang diikuti pengguna
+  // 2. Sinkronkan langsung ke Supabase Cloud (tabel profiles & auth metadata)
+  if (isSupabaseConfigured && supabase) {
+    try {
+      // Update langsung berdasarkan email di tabel profiles
+      const { error: profErr } = await supabase
+        .from("profiles")
+        .update({
+          full_name: updated.fullName,
+          nim: updated.nim,
+          major: updated.major,
+          semester: updated.semester,
+          campus: updated.campus,
+          avatar_url: updated.avatarUrl,
+        })
+        .eq("email", cleanEmail);
+
+      if (profErr) {
+        console.warn("[UPDATE_PROFILE] Supabase profile update error:", profErr);
+      }
+
+      // Update auth user metadata jika ada session aktif
+      try {
+        await supabase.auth.updateUser({
+          data: {
+            full_name: updated.fullName,
+            nim: updated.nim,
+            major: updated.major,
+            semester: updated.semester,
+            campus: updated.campus,
+            avatar_url: updated.avatarUrl,
+          },
+        });
+      } catch {}
+
+      // Sinkronisasi avatar & nama inviter di collaboration_invitations
+      try {
+        await supabase
+          .from("collaboration_invitations")
+          .update({
+            inviter_name: updated.fullName,
+            inviter_avatar: updated.avatarUrl,
+          })
+          .eq("invited_email", cleanEmail);
+      } catch {}
+    } catch (err) {
+      console.warn("Gagal update profil di Supabase:", err);
+    }
+  }
+
+  // 3. Perbarui avatar & nama di seluruh tugas lokal yang diikuti pengguna
   const localTasks = getLocalTasks();
   let tasksChanged = false;
   for (const t of localTasks) {
@@ -2302,88 +2343,20 @@ export async function updateUserProfile(updates: Partial<UserProfile>): Promise<
     saveLocalTasks(localTasks);
   }
 
-  // 3. Sinkronkan profil langsung ke Supabase Cloud (PROFILE_RECORD & Realtime broadcast)
-  if (isSupabaseConfigured && supabase) {
-    try {
-      // Upsert PROFILE_RECORD di collaboration_invitations (bebas RLS & memicu Realtime ke semua browser)
-      await supabase.from("collaboration_invitations").upsert({
-        id: `profile-record-${cleanEmail}`,
-        task_id: "PROFILE_RECORD",
-        task_title: updated.fullName,
-        course_name: null,
-        invited_email: cleanEmail,
-        token_hash: "profile",
-        status: "active",
-        expires_at: new Date(Date.now() + 365 * 86400000).toISOString(),
-        invited_by: updated.id || cleanEmail,
-        inviter_name: updated.fullName,
-        inviter_avatar: updated.avatarUrl,
-        task_payload: {
-          ...updated,
-          avatarUrl: updated.avatarUrl,
-          updatedAt: new Date().toISOString(),
-        },
-      });
+  // 4. Perbarui sesi lokal
+  saveCurrentUser(updated);
 
-      // Update avatar inviter di seluruh undangan aktif yang dibuat pengguna
-      await supabase
-        .from("collaboration_invitations")
-        .update({
-          inviter_name: updated.fullName,
-          inviter_avatar: updated.avatarUrl,
-        })
-        .eq("invited_by", updated.id || cleanEmail);
-
-      // Coba update juga tabel profiles jika diizinkan RLS
-      try {
-        await supabase
-          .from("profiles")
-          .update({
-            full_name: updated.fullName,
-            nim: updated.nim,
-            major: updated.major,
-            semester: updated.semester,
-            campus: updated.campus,
-            avatar_url: updated.avatarUrl,
-          })
-          .eq("email", cleanEmail);
-      } catch {}
-
-      // Update auth user metadata jika ada session aktif
-      try {
-        await supabase.auth.updateUser({
-          data: {
-            full_name: updated.fullName,
-            nim: updated.nim,
-            major: updated.major,
-            semester: updated.semester,
-            campus: updated.campus,
-            avatar_url: updated.avatarUrl,
-          },
-        });
-      } catch {}
-    } catch (err) {
-      console.warn("Gagal update profil di Supabase:", err);
+  const accounts = getRegisteredAccounts();
+  const nextAccounts = accounts.map((acc) => {
+    if (acc.user.id === updated.id || acc.user.email.toLowerCase() === cleanEmail) {
+      return {
+        ...acc,
+        user: updated,
+      };
     }
-  }
-
-  // 4. Sinkronkan ke Server DB via API route
-  if (typeof window !== "undefined") {
-    try {
-      await fetch("/api/db/students", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user: updated }),
-      });
-    } catch (e) {
-      console.warn("Gagal simpan profil ke server DB:", e);
-    }
-
-    // Trigger custom event agar komponen lokal seketika sinkron tanpa tunggu polling
-    try {
-      window.dispatchEvent(new CustomEvent("tugasku_profile_updated", { detail: updated }));
-    } catch {}
-  }
+    return acc;
+  });
+  saveRegisteredAccounts(nextAccounts);
 
   return updated;
 }

@@ -13,15 +13,18 @@ import {
   Trash2, 
   UserPlus,
   Sparkles,
-  Check
+  Check,
+  LogOut
 } from "lucide-react";
-import { Task, Course } from "@/types";
+import { Task, Course, UserProfile } from "@/types";
 import { getTaskStatus, getTaskStatusLabel, formatDeadline, isDeadlineNear } from "@/lib/businessRules";
+import { checkIsTaskOwner } from "@/lib/storage";
 
 interface TaskCardProps {
   task: Task;
   course?: Course;
   currentUserId?: string;
+  currentUser?: UserProfile | null;
   onUpdateProgress: (taskId: string, newProgress: number) => void;
   onEdit: (task: Task) => void;
   onDelete: (taskId: string) => void;
@@ -32,6 +35,7 @@ export function TaskCard({
   task,
   course,
   currentUserId,
+  currentUser,
   onUpdateProgress,
   onEdit,
   onDelete,
@@ -41,12 +45,15 @@ export function TaskCard({
   const status = getTaskStatus(task);
   const isUrgent = isDeadlineNear(task.deadline, 24);
 
-  // Anggota kolaborasi hanya bisa ceklis progres saja (tidak bisa edit, undang, atau hapus tugas)
+  // Penentuan pemilik / ketua tugas akurat via checkIsTaskOwner
   const isOwner = React.useMemo(() => {
     if (task.taskType !== "group") return true;
+    if (currentUser) {
+      return checkIsTaskOwner(task, currentUser);
+    }
     if (!currentUserId) return true;
     const cleanCurrent = currentUserId.toLowerCase().trim();
-    if (task.createdBy && task.createdBy.toLowerCase().trim() === cleanCurrent) return true;
+    if (task.createdBy && (task.createdBy.toLowerCase().trim() === cleanCurrent || cleanCurrent.includes(task.createdBy.toLowerCase().trim()))) return true;
     const userMember = task.members?.find(
       (m) =>
         (m.userId && m.userId.toLowerCase().trim() === cleanCurrent) ||
@@ -56,7 +63,7 @@ export function TaskCard({
       return userMember.role === "owner";
     }
     return false;
-  }, [task, currentUserId]);
+  }, [task, currentUser, currentUserId]);
 
   // Status Styling
   const statusConfig = {
@@ -120,7 +127,7 @@ export function TaskCard({
           )}
         </div>
 
-        {/* Action Menu (Hanya untuk pemilik/ketua tugas; Anggota kolaborasi hanya bisa ceklis progres) */}
+        {/* Action Menu: Pemilik/Ketua Tugas memiliki menu lengkap, Anggota memiliki opsi Keluar dari Tugas */}
         {isOwner ? (
           <div className="relative" onClick={(e) => e.stopPropagation()}>
             <button
@@ -169,13 +176,38 @@ export function TaskCard({
             )}
           </div>
         ) : (
-          <span
-            className="text-[10px] font-bold px-2 py-1 rounded-xl bg-purple-50 text-purple-600 border border-purple-100 select-none flex items-center gap-1 shadow-2xs"
-            title="Anggota Kolaborasi (Hanya dapat mencentang progres tugas)"
-          >
-            <Users className="w-3 h-3 text-purple-500" />
-            <span>Anggota</span>
-          </span>
+          <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+            <span
+              className="text-[10px] font-bold px-2 py-1 rounded-xl bg-purple-50 text-purple-600 border border-purple-100 select-none flex items-center gap-1 shadow-2xs"
+              title="Anggota Kolaborasi (Dapat mencentang progres tugas)"
+            >
+              <Users className="w-3 h-3 text-purple-500" />
+              <span>Anggota</span>
+            </span>
+            <div className="relative">
+              <button
+                onClick={() => setMenuOpen(!menuOpen)}
+                className="w-7 h-7 rounded-lg hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-700 transition-colors cursor-pointer"
+                title="Opsi Kolaborasi"
+              >
+                <MoreVertical className="w-3.5 h-3.5" />
+              </button>
+              {menuOpen && (
+                <div className="absolute right-0 top-8 w-44 bg-white rounded-2xl shadow-xl border border-gray-100 p-1.5 z-30">
+                  <button
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onDelete(task.id);
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-rose-600 hover:bg-rose-50 rounded-xl cursor-pointer"
+                  >
+                    <LogOut className="w-3.5 h-3.5 text-rose-500" />
+                    <span>Keluar dari Tugas</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
         )}
       </div>
 
