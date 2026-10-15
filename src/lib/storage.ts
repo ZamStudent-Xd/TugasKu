@@ -859,8 +859,7 @@ export async function deleteCourse(
             const rowInvitedEmail = (row.invited_email || "").toLowerCase().trim();
             const isUserRow =
               (email && rowInvitedEmail === email) ||
-              (nim && rowInvitedEmail.startsWith(nim + "@")) ||
-              (userId && row.invited_by !== userId && row.task_payload?.members?.some((m: any) => m.userId === userId));
+              (nim && (rowInvitedEmail === `${nim}@bsi.ac.id` || rowInvitedEmail.startsWith(nim + "@")));
 
             if (isUserRow) {
               await removeMemberFromTask(row.task_id, email || userId || "", activeUser);
@@ -1458,7 +1457,12 @@ export async function removeMemberFromTask(
   // Cari profil lengkap mahasiswa yang akan dikeluarkan (id UUID, email, nim, fullName)
   let targetId = userProfileHint?.id?.toLowerCase() || (cleanTarget.includes("@") ? "" : cleanTarget);
   let targetEmail = userProfileHint?.email?.toLowerCase().trim() || (cleanTarget.includes("@") ? cleanTarget : "");
-  let targetNim = userProfileHint?.nim?.toLowerCase().trim() || (cleanTarget.includes("@") ? cleanTarget.split("@")[0] : "");
+  let targetNim = userProfileHint?.nim?.toLowerCase().trim() || "";
+  if (cleanTarget.includes("@") && /^\d+$/.test(cleanTarget.split("@")[0])) {
+    targetNim = cleanTarget.split("@")[0];
+  } else if (/^\d+$/.test(cleanTarget)) {
+    targetNim = cleanTarget;
+  }
   let targetFullName = userProfileHint?.fullName?.toLowerCase().trim() || "";
 
   let allStudents: UserProfile[] = [];
@@ -1483,7 +1487,7 @@ export async function removeMemberFromTask(
             (cleanTarget && (pId === cleanTarget || pEmail === cleanTarget || pNim === cleanTarget || pName === cleanTarget)) ||
             (targetId && pId === targetId) ||
             (targetEmail && pEmail === targetEmail) ||
-            (targetNim && (pNim === targetNim || pEmail.startsWith(targetNim + "@")));
+            (targetNim && (pNim === targetNim || pEmail === `${targetNim}@bsi.ac.id` || pEmail.startsWith(`${targetNim}@`)));
 
           if (isMatch) {
             targetId = targetId || pId;
@@ -1499,42 +1503,63 @@ export async function removeMemberFromTask(
   }
 
   const matchedStudent = allStudents.find((s) => {
-    if (s.id && s.id.toLowerCase() === cleanTarget) return true;
-    if (s.email && s.email.toLowerCase().trim() === cleanTarget) return true;
-    if (s.nim && (s.nim.toLowerCase().trim() === cleanTarget || cleanTarget.includes(s.nim.toLowerCase().trim()))) return true;
-    if (s.fullName && s.fullName.toLowerCase().trim() === cleanTarget) return true;
+    const sId = (s.id || "").toLowerCase();
+    const sEmail = (s.email || "").toLowerCase().trim();
+    const sNim = (s.nim || "").toLowerCase().trim();
+    const sName = (s.fullName || "").toLowerCase().trim();
+
+    if (sId && sId === cleanTarget) return true;
+    if (sEmail && sEmail === cleanTarget) return true;
+    if (sNim && (sNim === cleanTarget || cleanTarget === `${sNim}@bsi.ac.id` || (cleanTarget.includes("@") && cleanTarget.split("@")[0] === sNim))) return true;
+    if (sName && sName === cleanTarget) return true;
     return false;
   });
 
   if (matchedStudent) {
-    targetId = targetId || matchedStudent.id ? matchedStudent.id.toLowerCase() : "";
-    targetEmail = targetEmail || (matchedStudent.email ? matchedStudent.email.toLowerCase().trim() : targetEmail);
-    targetNim = targetNim || (matchedStudent.nim ? matchedStudent.nim.toLowerCase().trim() : "");
-    targetFullName = targetFullName || (matchedStudent.fullName ? matchedStudent.fullName.toLowerCase().trim() : "");
+    targetId = matchedStudent.id ? matchedStudent.id.toLowerCase() : targetId;
+    targetEmail = matchedStudent.email ? matchedStudent.email.toLowerCase().trim() : targetEmail;
+    targetNim = matchedStudent.nim ? matchedStudent.nim.toLowerCase().trim() : targetNim;
+    targetFullName = matchedStudent.fullName ? matchedStudent.fullName.toLowerCase().trim() : targetFullName;
   } else if (targetTask?.members) {
-    const m = targetTask.members.find(
-      (mem) =>
-        mem.userId.toLowerCase().trim() === cleanTarget ||
-        (mem.fullName && mem.fullName.toLowerCase().trim() === cleanTarget)
-    );
+    const m = targetTask.members.find((mem) => {
+      const mUser = (mem.userId || "").toLowerCase().trim();
+      const mName = (mem.fullName || "").toLowerCase().trim();
+      return mUser === cleanTarget || (cleanTarget && mName === cleanTarget);
+    });
     if (m) {
-      if (m.userId.includes("@")) targetEmail = targetEmail || m.userId.toLowerCase().trim();
-      else targetId = targetId || m.userId.toLowerCase();
+      if (m.userId.includes("@")) {
+        targetEmail = targetEmail || m.userId.toLowerCase().trim();
+      } else {
+        targetId = targetId || m.userId.toLowerCase();
+      }
       targetFullName = targetFullName || m.fullName.toLowerCase().trim();
     }
   }
 
   // Fungsi pencocokan anggota yang dikeluarkan (mencakup ID, email, NIM, nama lengkap, atau target)
   const isTargetMember = (m: TaskMember) => {
+    // Ketua / owner tugas tidak pernah boleh dikeluarkan lewat fungsi ini
+    if (m.role === "owner") return false;
+
     const mUser = (m.userId || "").toLowerCase().trim();
     const mName = (m.fullName || "").toLowerCase().trim();
     const mEmail = ((m as any).email || "").toLowerCase().trim();
 
-    if (cleanTarget && (mUser === cleanTarget || mName === cleanTarget || mEmail === cleanTarget)) return true;
+    // 1. Cek langsung dengan cleanTarget
+    if (cleanTarget && (mUser === cleanTarget || mEmail === cleanTarget || mName === cleanTarget)) return true;
+
+    // 2. Cek UUID ID pasti
     if (targetId && mUser === targetId) return true;
+
+    // 3. Cek Email pasti
     if (targetEmail && (mUser === targetEmail || mEmail === targetEmail)) return true;
-    if (targetNim && (mName === targetNim || mUser.includes(targetNim) || mName.includes(targetNim))) return true;
-    if (targetFullName && (mName === targetFullName || mName.includes(targetFullName))) return true;
+
+    // 4. Cek NIM pasti
+    if (targetNim && (mUser === targetNim || (m as any).nim?.toLowerCase().trim() === targetNim || mUser === `${targetNim}@bsi.ac.id` || mEmail === `${targetNim}@bsi.ac.id` || mUser.startsWith(`${targetNim}@`))) return true;
+
+    // 5. Cek Nama Lengkap (persis)
+    if (targetFullName && mName === targetFullName) return true;
+
     return false;
   };
 
@@ -1551,26 +1576,25 @@ export async function removeMemberFromTask(
           const rowEmail = (row.invited_email || "").toLowerCase().trim();
           const isBaseRow = row.id.startsWith("task-base-");
 
-          // Row undangan anggota yang harus dihapus: HANYA row invitee anggota tersebut (BUKAN base row creator)
+          // Row undangan anggota yang harus dihapus:
+          // HANYA baris undangan spesifik milik anggota yang dikeluarkan (BUKAN base row, BUKAN baris anggota lain!)
           const isTargetMemberRow =
             !isBaseRow &&
-            (
+            Boolean(
               row.id === cleanTarget ||
               (targetEmail && rowEmail === targetEmail) ||
-              rowEmail === cleanTarget ||
-              (targetNim && (rowEmail.startsWith(targetNim + "@") || rowEmail.includes(targetNim))) ||
-              (targetId && row.task_payload?.members?.some((m: any) => m.userId?.toLowerCase() === targetId)) ||
-              (targetFullName && row.task_payload?.members?.some((m: any) => m.fullName?.toLowerCase().trim() === targetFullName))
+              (cleanTarget && rowEmail === cleanTarget) ||
+              (targetNim && (rowEmail === `${targetNim}@bsi.ac.id` || rowEmail.startsWith(`${targetNim}@`)))
             );
 
           if (isTargetMemberRow) {
-            // Hapus baris undangan anggota yang dikeluarkan dari database cloud!
+            // Hapus HANYA baris undangan anggota yang dikeluarkan dari database cloud!
             await supabase
               .from("collaboration_invitations")
               .delete()
               .eq("id", row.id);
           } else if (row.task_payload) {
-            // Perbarui task_payload di baris lain (termasuk row base pembuat)
+            // Perbarui task_payload di baris lain (termasuk row base pembuat dan anggota lain yang tetap tinggal)
             const payload = row.task_payload as Task;
             const currentMembers = payload.members || [];
             const filteredMembers = currentMembers.filter((m) => !isTargetMember(m));
@@ -1620,18 +1644,47 @@ export async function removeMemberFromTask(
     }
   }
 
-  // 2. Perbarui penyimpanan lokal pembuat tugas atau buang tugas jika pemanggil adalah anggota yang keluar
-  const isSelfLeaving = activeUser && (
-    isTargetMember({
-      userId: activeUser.id,
-      fullName: activeUser.fullName,
-      email: activeUser.email,
-    } as any) ||
-    (cleanTarget && (
-      (activeUser.id && activeUser.id.toLowerCase() === cleanTarget) ||
-      (activeUser.email && activeUser.email.toLowerCase().trim() === cleanTarget) ||
-      (activeUser.nim && activeUser.nim.toLowerCase().trim() === cleanTarget)
-    ))
+  // Bersihkan undangan di local storage jika ada
+  try {
+    const localInvs = getTaskInvitations();
+    const updatedLocalInvs = localInvs.filter((inv) => {
+      if (inv.taskId !== taskId) return true;
+      const invEmail = (inv.invitedEmail || "").toLowerCase().trim();
+      const isMatch =
+        inv.id === cleanTarget ||
+        (targetEmail && invEmail === targetEmail) ||
+        (cleanTarget && invEmail === cleanTarget) ||
+        (targetNim && (invEmail === `${targetNim}@bsi.ac.id` || invEmail.startsWith(`${targetNim}@`)));
+      return !isMatch;
+    });
+    if (updatedLocalInvs.length !== localInvs.length) {
+      saveTaskInvitations(updatedLocalInvs);
+    }
+  } catch (err) {
+    console.warn("Gagal update local task invitations:", err);
+  }
+
+  // 2. Perbarui penyimpanan lokal pembuat tugas atau buang tugas jika pemanggil adalah anggota yang keluar sendiri
+  const isTaskCreatorOrOwner = targetTask && (
+    checkIsTaskOwner(targetTask, activeUser) ||
+    (activeUser?.id && targetTask.createdBy?.toLowerCase() === activeUser.id.toLowerCase()) ||
+    (activeUser?.email && targetTask.createdBy?.toLowerCase().trim() === activeUser.email.toLowerCase().trim())
+  );
+
+  const isSelfLeaving = !isTaskCreatorOrOwner && Boolean(
+    activeUser && (
+      isTargetMember({
+        userId: activeUser.id,
+        fullName: activeUser.fullName,
+        email: activeUser.email,
+        role: "member",
+      } as any) ||
+      (cleanTarget && (
+        (activeUser.id && activeUser.id.toLowerCase() === cleanTarget) ||
+        (activeUser.email && activeUser.email.toLowerCase().trim() === cleanTarget) ||
+        (activeUser.nim && activeUser.nim.toLowerCase().trim() === cleanTarget)
+      ))
+    )
   );
 
   let updatedTasks: Task[];

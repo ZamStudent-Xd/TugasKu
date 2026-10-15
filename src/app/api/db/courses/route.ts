@@ -314,10 +314,9 @@ export async function DELETE(request: NextRequest) {
                 const rowEmail = (row.invited_email || "").toLowerCase().trim();
                 const isTargetRow =
                   !row.id.startsWith("task-base-") &&
-                  (
+                  Boolean(
                     (effectiveEmail && rowEmail === effectiveEmail) ||
-                    (effectiveNim && (rowEmail.startsWith(effectiveNim + "@") || rowEmail.includes(effectiveNim))) ||
-                    (effectiveUserId && row.task_payload?.members?.some((m: any) => m.userId === effectiveUserId))
+                    (effectiveNim && (rowEmail === `${effectiveNim}@bsi.ac.id` || rowEmail.startsWith(`${effectiveNim}@`)))
                   );
 
                 if (isTargetRow) {
