@@ -2,13 +2,20 @@
 
 import React, { useState, useMemo, useEffect } from "react";
 import { X, UserPlus, Users, Copy, Check, Trash2, Search, AlertCircle, CheckCircle2, Loader2, Clock } from "lucide-react";
-import { Task, UserProfile } from "@/types";
-import { fetchRegisteredStudents, getCurrentUser, getTaskInvitations } from "@/lib/storage";
+import { Task, UserProfile, TaskMember } from "@/types";
+import { 
+  fetchRegisteredStudents, 
+  getCurrentUser, 
+  getTaskInvitations, 
+  checkIsTaskOwner, 
+  cleanAndDeduplicateMembers 
+} from "@/lib/storage";
 import { isSupabaseConfigured, supabase } from "@/lib/supabaseClient";
 
 interface InviteMemberModalProps {
   isOpen: boolean;
   task: Task | null;
+  currentUser?: UserProfile | null;
   onClose: () => void;
   onAddMember: (taskId: string, email: string) => void;
   onRemoveMember: (taskId: string, userId: string) => void;
@@ -17,6 +24,7 @@ interface InviteMemberModalProps {
 export function InviteMemberModal({
   isOpen,
   task,
+  currentUser: propUser,
   onClose,
   onAddMember,
   onRemoveMember,
@@ -29,7 +37,11 @@ export function InviteMemberModal({
   const [isLoadingStudents, setIsLoadingStudents] = useState(false);
   const [serverPendingEmails, setServerPendingEmails] = useState<string[]>([]);
 
-  const currentUser = useMemo(() => getCurrentUser(), [isOpen]);
+  const currentUser = useMemo(() => propUser || getCurrentUser(), [propUser, isOpen]);
+  const isOwner = useMemo(() => {
+    if (!task) return false;
+    return checkIsTaskOwner(task, currentUser);
+  }, [task, currentUser]);
 
   // Sinkronkan status undangan aktif dari server DB untuk tugas ini
   useEffect(() => {
@@ -237,7 +249,47 @@ export function InviteMemberModal({
 
   if (!isOpen || !task) return null;
 
-  const currentMembers = task.members || [];
+  const currentMembers = useMemo(() => {
+    if (!task) return [];
+    const raw = task.members || [];
+    const cleaned = cleanAndDeduplicateMembers(raw, registeredStudents);
+    return cleaned.sort((a, b) => {
+      if (a.role === "owner") return -1;
+      if (b.role === "owner") return 1;
+      return a.fullName.localeCompare(b.fullName);
+    });
+  }, [task?.members, registeredStudents]);
+
+  const getStudentInfo = (m: TaskMember) => {
+    const rawUserId = (m.userId || "").toLowerCase().trim();
+    const rawName = (m.fullName || "").toLowerCase().trim();
+    const rawEmail = (m.email || "").toLowerCase().trim();
+
+    return registeredStudents.find((s) => {
+      if (s.id && s.id.toLowerCase() === rawUserId) return true;
+      if (s.email && (s.email.toLowerCase().trim() === rawUserId || s.email.toLowerCase().trim() === rawEmail)) return true;
+      if (s.fullName && s.fullName.toLowerCase().trim() === rawName) return true;
+      if (s.nim && (rawName === s.nim.toLowerCase().trim() || rawUserId.includes(s.nim.toLowerCase().trim()))) return true;
+      return false;
+    });
+  };
+
+  const isCurrentUserMember = (m: TaskMember) => {
+    if (!currentUser) return false;
+    const myId = (currentUser.id || "").toLowerCase().trim();
+    const myEmail = (currentUser.email || "").toLowerCase().trim();
+    const myName = (currentUser.fullName || "").toLowerCase().trim();
+
+    const mUserId = (m.userId || "").toLowerCase().trim();
+    const mEmail = (m.email || "").toLowerCase().trim();
+    const mName = (m.fullName || "").toLowerCase().trim();
+
+    return (
+      (myId && (mUserId === myId || mUserId === myEmail)) ||
+      (myEmail && (mEmail === myEmail || mUserId === myEmail)) ||
+      (myName && mName === myName)
+    );
+  };
 
   const isMember = (student: UserProfile) => {
     return currentMembers.some(
@@ -304,11 +356,30 @@ export function InviteMemberModal({
           <div className="w-10 h-10 rounded-2xl bg-purple-50 flex items-center justify-center text-purple-600 mb-2.5">
             <Users className="w-5 h-5" />
           </div>
-          <h2 className="text-xl font-bold text-[#1E1B4B]">Kolaborasi Tugas Kelompok</h2>
+          <h2 className="text-xl font-bold text-[#1E1B4B]">
+            {isOwner ? "Kolaborasi Tugas Kelompok" : "Anggota Kolaborasi Tugas"}
+          </h2>
           <p className="text-xs text-gray-500 mt-0.5 line-clamp-1">
             {task.title}
           </p>
         </div>
+
+        {!isOwner && (
+          <div className="mb-5 p-3.5 rounded-2xl bg-gradient-to-r from-purple-50/90 to-indigo-50/90 border border-purple-100 flex items-start gap-3">
+            <div className="w-8 h-8 rounded-xl bg-purple-100 flex items-center justify-center text-purple-600 shrink-0 mt-0.5">
+              <Users className="w-4 h-4" />
+            </div>
+            <div className="text-left text-xs text-purple-950">
+              <p className="font-bold flex items-center gap-1.5">
+                <span>Kolaborasi Tugas Kelompok</span>
+                <span className="text-[10px] bg-purple-200/80 text-purple-800 font-extrabold px-2 py-0.5 rounded-lg">Anggota</span>
+              </p>
+              <p className="text-[11px] text-purple-700 mt-1 leading-relaxed">
+                Berikut adalah daftar seluruh rekan mahasiswa yang tergabung dalam pengerjaan tugas kelompok ini.
+              </p>
+            </div>
+          </div>
+        )}
 
         {feedbackMsg && (
           <div
@@ -327,186 +398,222 @@ export function InviteMemberModal({
           </div>
         )}
 
-        {/* 1. Pencarian Mahasiswa Berdasarkan Nama */}
-        <div className="mb-6 space-y-2">
-          <label className="block text-xs font-bold text-gray-700">
-            Cari Nama Mahasiswa Terdaftar di Sistem
-          </label>
-          <div className="relative">
-            <Search className="w-4 h-4 text-gray-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => {
-                setSearchQuery(e.target.value);
-                if (feedbackMsg) setFeedbackMsg(null);
-              }}
-              placeholder="Ketik minimal 1 huruf nama atau NIM mahasiswa..."
-              className="w-full pl-10 pr-10 py-2.5 bg-[#F8F9FE] border border-[#E2E8F5] rounded-2xl text-xs focus:outline-none focus:ring-2 focus:ring-purple-400 text-gray-800 placeholder:text-gray-400 transition-all"
-            />
-            {searchQuery && (
-              <button
-                type="button"
-                onClick={() => setSearchQuery("")}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
+        {/* Bagian Khusus Ketua Kolaborasi: Cari & Undang serta Bagikan Tautan */}
+        {isOwner && (
+          <>
+            {/* 1. Pencarian Mahasiswa Berdasarkan Nama */}
+            <div className="mb-6 space-y-2">
+              <label className="block text-xs font-bold text-gray-700">
+                Cari Nama Mahasiswa Terdaftar di Sistem
+              </label>
+              <div className="relative">
+                <Search className="w-4 h-4 text-gray-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => {
+                    setSearchQuery(e.target.value);
+                    if (feedbackMsg) setFeedbackMsg(null);
+                  }}
+                  placeholder="Ketik minimal 1 huruf nama atau NIM mahasiswa..."
+                  className="w-full pl-10 pr-10 py-2.5 bg-[#F8F9FE] border border-[#E2E8F5] rounded-2xl text-xs focus:outline-none focus:ring-2 focus:ring-purple-400 text-gray-800 placeholder:text-gray-400 transition-all"
+                />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery("")}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+
+              {/* Hasil Pencarian Nama Mahasiswa dari Database */}
+              <div className="mt-2 space-y-2 max-h-56 overflow-y-auto pr-1">
+                {searchQuery.trim().length === 0 ? (
+                  /* State saat kolom pencarian belum diisi */
+                  <div className="p-5 rounded-2xl bg-[#F8F9FE] border border-dashed border-[#E2E8F5] text-center space-y-1.5">
+                    <div className="w-8 h-8 rounded-full bg-purple-50 flex items-center justify-center text-purple-600 mx-auto">
+                      <Search className="w-4 h-4" />
+                    </div>
+                    <p className="text-xs font-bold text-gray-700">Mulai Pencarian Rekan</p>
+                    <p className="text-[11px] text-gray-400">
+                      Ketik minimal 1 huruf nama atau NIM mahasiswa di atas untuk mencari rekan kolaborasi.
+                    </p>
+                  </div>
+                ) : isLoadingStudents ? (
+                  <div className="p-4 rounded-2xl bg-indigo-50/60 border border-indigo-100 flex items-center justify-center gap-2.5 text-xs font-semibold text-indigo-700">
+                    <Loader2 className="w-4 h-4 animate-spin text-indigo-600 shrink-0" />
+                    <span>Mencari di database mahasiswa TugasKu...</span>
+                  </div>
+                ) : filteredStudents.length > 0 ? (
+                  filteredStudents.map((student) => {
+                    const alreadyMember = isMember(student);
+                    const isPending = isPendingInvite(student);
+
+                    return (
+                      <div
+                        key={student.id || student.email}
+                        className="flex items-center justify-between p-2.5 rounded-2xl bg-white border border-gray-100 hover:border-purple-200 transition-all shadow-2xs"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <img
+                            src={
+                              student.avatarUrl ||
+                              `https://api.dicebear.com/7.x/bottts/svg?seed=${student.fullName}`
+                            }
+                            alt={student.fullName}
+                            className="w-8 h-8 rounded-xl object-cover bg-gray-100 ring-1 ring-gray-200 shrink-0"
+                          />
+                          <div className="min-w-0 text-left">
+                            <p className="text-xs font-bold text-[#1E1B4B] truncate">
+                              {student.fullName}
+                            </p>
+                            <p className="text-[10px] text-gray-400 truncate">
+                              {student.nim ? `${student.nim} • ` : ""}{student.major || "Mahasiswa BSI"}
+                            </p>
+                          </div>
+                        </div>
+
+                        {alreadyMember ? (
+                          <span className="px-2.5 py-1 rounded-xl bg-emerald-50 text-emerald-700 text-[10px] font-black border border-emerald-200/60 shrink-0 flex items-center gap-1">
+                            <Check className="w-3 h-3" />
+                            <span>Anggota</span>
+                          </span>
+                        ) : isPending ? (
+                          <span className="px-2.5 py-1 rounded-xl bg-amber-50 text-amber-700 text-[10px] font-black border border-amber-200/60 shrink-0 flex items-center gap-1">
+                            <Clock className="w-3 h-3" />
+                            <span>Menunggu Diterima</span>
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleSelectStudent(student)}
+                            className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-[11px] font-bold transition-all shadow-xs flex items-center gap-1.5 shrink-0 cursor-pointer"
+                          >
+                            <UserPlus className="w-3 h-3" />
+                            <span>Undang</span>
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })
+                ) : (
+                  /* State jika nama mahasiswa BELUM TERDAFTAR dalam sistem */
+                  <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 text-left space-y-1">
+                    <div className="flex items-center gap-1.5 font-bold text-xs text-amber-800">
+                      <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                      <span>Mahasiswa Belum Terdaftar</span>
+                    </div>
+                    <p className="text-[11px] text-amber-700 leading-relaxed">
+                      Mahasiswa dengan nama &ldquo;<strong>{searchQuery}</strong>&rdquo; belum ditemukan di database akun TugasKu. Pastikan rekan mahasiswa Anda sudah mendaftar akun terlebih dahulu.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* 2. Tautan Undangan Tugas (Opsional) */}
+            <div className="mb-6 p-4 rounded-2xl bg-[#F8F9FE] border border-[#E2E8F5]">
+              <span className="block text-[11px] font-bold text-gray-500 mb-1.5">
+                Atau Bagikan Tautan Undangan Langsung (Berlaku 7 Hari)
+              </span>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  readOnly
+                  value={inviteLink}
+                  className="w-full bg-white px-3 py-1.5 text-xs text-gray-600 rounded-xl border border-gray-200 select-all focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={handleCopyLink}
+                  className="p-2 rounded-xl bg-white border border-gray-200 text-gray-600 hover:text-purple-600 hover:border-purple-200 transition-all shrink-0 cursor-pointer"
+                  title="Salin Tautan"
+                >
+                  {copied ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* 3. Daftar Anggota Kelompok (Dapat Dilihat Oleh Semua Anggota & Ketua) */}
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-xs font-extrabold uppercase tracking-wider text-gray-700">
+              {isOwner ? "Anggota Aktif Saat Ini" : "Daftar Anggota Kelompok"} ({currentMembers.length})
+            </h3>
+            <span className="text-[11px] text-gray-400 font-medium">
+              {currentMembers.filter((m) => m.role === "owner").length > 0 ? "1 Ketua • " : ""}
+              {currentMembers.filter((m) => m.role !== "owner").length} Anggota
+            </span>
           </div>
 
-          {/* Hasil Pencarian Nama Mahasiswa dari Database */}
-          <div className="mt-2 space-y-2 max-h-56 overflow-y-auto pr-1">
-            {searchQuery.trim().length === 0 ? (
-              /* State saat kolom pencarian belum diisi */
-              <div className="p-5 rounded-2xl bg-[#F8F9FE] border border-dashed border-[#E2E8F5] text-center space-y-1.5">
-                <div className="w-8 h-8 rounded-full bg-purple-50 flex items-center justify-center text-purple-600 mx-auto">
-                  <Search className="w-4 h-4" />
-                </div>
-                <p className="text-xs font-bold text-gray-700">Mulai Pencarian Rekan</p>
-                <p className="text-[11px] text-gray-400">
-                  Ketik minimal 1 huruf nama atau NIM mahasiswa di atas untuk mencari rekan kolaborasi.
-                </p>
-              </div>
-            ) : isLoadingStudents ? (
-              <div className="p-4 rounded-2xl bg-indigo-50/60 border border-indigo-100 flex items-center justify-center gap-2.5 text-xs font-semibold text-indigo-700">
-                <Loader2 className="w-4 h-4 animate-spin text-indigo-600 shrink-0" />
-                <span>Mencari di database mahasiswa TugasKu...</span>
-              </div>
-            ) : filteredStudents.length > 0 ? (
-              filteredStudents.map((student) => {
-                const alreadyMember = isMember(student);
-                const isPending = isPendingInvite(student);
+          <div className={`${isOwner ? "max-h-44" : "max-h-72"} overflow-y-auto space-y-2 pr-1`}>
+            {currentMembers.length === 0 ? (
+              <p className="text-xs text-gray-400 italic py-2">Belum ada anggota yang bergabung.</p>
+            ) : (
+              currentMembers.map((m) => {
+                const info = getStudentInfo(m);
+                const isMe = isCurrentUserMember(m);
+                const avatarSrc = info?.avatarUrl || m.avatarUrl || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(m.fullName)}`;
+                const subtitle = info?.nim
+                  ? `${info.nim} • ${info.major || "Mahasiswa BSI"}`
+                  : (info?.email || m.email || (m.role === "owner" ? "Ketua Kelompok" : "Mahasiswa BSI"));
 
                 return (
                   <div
-                    key={student.id || student.email}
+                    key={m.userId || m.fullName}
                     className="flex items-center justify-between p-2.5 rounded-2xl bg-white border border-gray-100 hover:border-purple-200 transition-all shadow-2xs"
                   >
                     <div className="flex items-center gap-2.5 min-w-0">
                       <img
-                        src={
-                          student.avatarUrl ||
-                          `https://api.dicebear.com/7.x/bottts/svg?seed=${student.fullName}`
-                        }
-                        alt={student.fullName}
-                        className="w-8 h-8 rounded-xl object-cover bg-gray-100 ring-1 ring-gray-200 shrink-0"
+                        src={avatarSrc}
+                        alt={m.fullName}
+                        className="w-9 h-9 rounded-xl object-cover bg-purple-50 ring-1 ring-purple-100 shrink-0"
                       />
                       <div className="min-w-0 text-left">
-                        <p className="text-xs font-bold text-[#1E1B4B] truncate">
-                          {student.fullName}
-                        </p>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <p className="text-xs font-bold text-[#1E1B4B] truncate">{m.fullName}</p>
+                          {isMe && (
+                            <span className="px-1.5 py-0.5 rounded-md bg-purple-100 text-purple-700 text-[9px] font-black shrink-0">
+                              Anda
+                            </span>
+                          )}
+                        </div>
                         <p className="text-[10px] text-gray-400 truncate">
-                          {student.nim ? `${student.nim} • ` : ""}{student.major || "Mahasiswa BSI"}
+                          {subtitle}
                         </p>
                       </div>
                     </div>
 
-                    {alreadyMember ? (
-                      <span className="px-2.5 py-1 rounded-xl bg-emerald-50 text-emerald-700 text-[10px] font-black border border-emerald-200/60 shrink-0 flex items-center gap-1">
-                        <Check className="w-3 h-3" />
-                        <span>Anggota</span>
-                      </span>
-                    ) : isPending ? (
-                      <span className="px-2.5 py-1 rounded-xl bg-amber-50 text-amber-700 text-[10px] font-black border border-amber-200/60 shrink-0 flex items-center gap-1">
-                        <Clock className="w-3 h-3" />
-                        <span>Menunggu Diterima</span>
-                      </span>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => handleSelectStudent(student)}
-                        className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-[11px] font-bold transition-all shadow-xs flex items-center gap-1.5 shrink-0 cursor-pointer"
-                      >
-                        <UserPlus className="w-3 h-3" />
-                        <span>Undang</span>
-                      </button>
-                    )}
+                    <div className="flex items-center gap-2 shrink-0">
+                      {m.role === "owner" ? (
+                        <span className="px-2.5 py-1 rounded-xl bg-amber-50 text-amber-800 text-[10px] font-black border border-amber-200/70 shrink-0">
+                          Ketua Kelompok
+                        </span>
+                      ) : (
+                        <span className="px-2.5 py-1 rounded-xl bg-indigo-50 text-indigo-700 text-[10px] font-bold border border-indigo-200/60 shrink-0">
+                          Anggota
+                        </span>
+                      )}
+
+                      {isOwner && m.role !== "owner" && !isMe && (
+                        <button
+                          type="button"
+                          onClick={() => onRemoveMember(task.id, m.userId)}
+                          className="p-1.5 rounded-xl text-gray-400 hover:text-pink-600 hover:bg-pink-50 transition-colors cursor-pointer"
+                          title="Keluarkan dari kelompok"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
                   </div>
                 );
               })
-            ) : (
-              /* State jika nama mahasiswa BELUM TERDAFTAR dalam sistem */
-              <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 text-left space-y-1">
-                <div className="flex items-center gap-1.5 font-bold text-xs text-amber-800">
-                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
-                  <span>Mahasiswa Belum Terdaftar</span>
-                </div>
-                <p className="text-[11px] text-amber-700 leading-relaxed">
-                  Mahasiswa dengan nama &ldquo;<strong>{searchQuery}</strong>&rdquo; belum ditemukan di database akun TugasKu. Pastikan rekan mahasiswa Anda sudah mendaftar akun terlebih dahulu.
-                </p>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* 2. Tautan Undangan Tugas (Opsional) */}
-        <div className="mb-6 p-4 rounded-2xl bg-[#F8F9FE] border border-[#E2E8F5]">
-          <span className="block text-[11px] font-bold text-gray-500 mb-1.5">
-            Atau Bagikan Tautan Undangan Langsung (Berlaku 7 Hari)
-          </span>
-          <div className="flex items-center gap-2">
-            <input
-              type="text"
-              readOnly
-              value={inviteLink}
-              className="w-full bg-white px-3 py-1.5 text-xs text-gray-600 rounded-xl border border-gray-200 select-all focus:outline-none"
-            />
-            <button
-              type="button"
-              onClick={handleCopyLink}
-              className="p-2 rounded-xl bg-white border border-gray-200 text-gray-600 hover:text-purple-600 hover:border-purple-200 transition-all shrink-0 cursor-pointer"
-              title="Salin Tautan"
-            >
-              {copied ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
-            </button>
-          </div>
-        </div>
-
-        {/* 3. Daftar Anggota Aktif Saat Ini */}
-        <div>
-          <h3 className="text-xs font-extrabold uppercase tracking-wider text-gray-700 mb-3">
-            Anggota Aktif Saat Ini ({currentMembers.length})
-          </h3>
-
-          <div className="max-h-40 overflow-y-auto space-y-2 pr-1">
-            {currentMembers.length === 0 ? (
-              <p className="text-xs text-gray-400 italic py-2">Belum ada anggota yang bergabung.</p>
-            ) : (
-              currentMembers.map((m) => (
-                <div
-                  key={m.userId}
-                  className="flex items-center justify-between p-2.5 rounded-2xl bg-white border border-gray-100 hover:border-gray-200 transition-all shadow-2xs"
-                >
-                  <div className="flex items-center gap-2.5">
-                    <img
-                      src={
-                        m.avatarUrl ||
-                        `https://api.dicebear.com/7.x/bottts/svg?seed=${m.fullName}`
-                      }
-                      alt={m.fullName}
-                      className="w-8 h-8 rounded-xl object-cover bg-purple-50 ring-1 ring-purple-100"
-                    />
-                    <div>
-                      <p className="text-xs font-bold text-[#1E1B4B]">{m.fullName}</p>
-                      <span className="text-[10px] text-gray-400 capitalize">
-                        {m.role === "owner" ? "Ketua Kelompok" : "Anggota"}
-                      </span>
-                    </div>
-                  </div>
-
-                  {m.role !== "owner" && (
-                    <button
-                      type="button"
-                      onClick={() => onRemoveMember(task.id, m.userId)}
-                      className="p-1.5 rounded-xl text-gray-400 hover:text-pink-600 hover:bg-pink-50 transition-colors cursor-pointer"
-                      title="Keluarkan dari kelompok"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-                </div>
-              ))
             )}
           </div>
         </div>
@@ -517,7 +624,7 @@ export function InviteMemberModal({
             onClick={onClose}
             className="px-5 py-2.5 rounded-xl bg-gray-100 text-xs font-bold text-gray-700 hover:bg-gray-200 transition-colors cursor-pointer"
           >
-            Selesai
+            {isOwner ? "Selesai" : "Tutup"}
           </button>
         </div>
       </div>

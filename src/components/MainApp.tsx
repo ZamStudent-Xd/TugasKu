@@ -760,13 +760,6 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
   };
 
   const handleOpenInvite = (target: Task) => {
-    if (target.taskType === "group") {
-      const isOwner = checkIsTaskOwner(target, user);
-      if (!isOwner) {
-        addToast("info", "Hanya ketua kolaborasi yang dapat mengundang anggota.");
-        return;
-      }
-    }
     setInvitingTask(target);
   };
 
@@ -909,6 +902,13 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
   const handleAddMember = async (taskId: string, emailOrName: string) => {
     try {
       const taskObj = tasks.find((t) => t.id === taskId);
+      if (taskObj && taskObj.taskType === "group") {
+        const isOwner = checkIsTaskOwner(taskObj, user);
+        if (!isOwner) {
+          addToast("info", "Hanya ketua kolaborasi yang dapat mengundang anggota.");
+          return;
+        }
+      }
       const courseObj = taskObj ? courses.find((c) => isTaskBelongsToCourse(taskObj, c)) : undefined;
 
       const allStudents = await fetchRegisteredStudents();
@@ -952,6 +952,14 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
 
   const handleRemoveMember = async (taskId: string, userId: string) => {
     try {
+      const taskObj = tasks.find((t) => t.id === taskId);
+      if (taskObj && taskObj.taskType === "group") {
+        const isOwner = checkIsTaskOwner(taskObj, user);
+        if (!isOwner) {
+          addToast("info", "Hanya ketua kolaborasi yang dapat mengeluarkan anggota.");
+          return;
+        }
+      }
       const updated = await removeMemberFromTask(taskId, userId);
       setTasks(updated);
       const current = updated.find((t) => t.id === taskId);
@@ -2046,7 +2054,8 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
 
       <InviteMemberModal
         isOpen={Boolean(invitingTask)}
-        task={invitingTask}
+        task={invitingTask ? tasks.find((t) => t.id === invitingTask.id) || invitingTask : null}
+        currentUser={user}
         onClose={() => setInvitingTask(null)}
         onAddMember={handleAddMember}
         onRemoveMember={handleRemoveMember}

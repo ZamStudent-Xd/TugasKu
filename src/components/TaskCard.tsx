@@ -194,6 +194,18 @@ export function TaskCard({
               </button>
               {menuOpen && (
                 <div className="absolute right-0 top-8 w-44 bg-white rounded-2xl shadow-xl border border-gray-100 p-1.5 z-30">
+                  {task.taskType === "group" && (
+                    <button
+                      onClick={() => {
+                        setMenuOpen(false);
+                        onInvite(task);
+                      }}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold text-purple-700 hover:bg-purple-50 rounded-xl cursor-pointer"
+                    >
+                      <Users className="w-3.5 h-3.5 text-purple-500" />
+                      <span>Lihat Anggota</span>
+                    </button>
+                  )}
                   <button
                     onClick={() => {
                       setMenuOpen(false);
@@ -287,7 +299,12 @@ export function TaskCard({
       {/* Collaboration Avatar Stack (For Group Tasks) */}
       {task.taskType === "group" && (
         <div className="mt-4 pt-3 border-t border-gray-100 flex items-center justify-between">
-          <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onInvite(task)}
+            className="flex items-center gap-2 cursor-pointer hover:opacity-80 transition-opacity text-left bg-transparent border-none p-0 focus:outline-none"
+            title="Klik untuk melihat siapa saja anggota kelompok ini"
+          >
             <span className="text-[11px] text-gray-400 font-medium">Anggota:</span>
             <div className="flex -space-x-2 overflow-hidden items-center">
               {(task.members || []).slice(0, 4).map((m, idx) => (
@@ -315,15 +332,24 @@ export function TaskCard({
                 +{(task.members?.length || 0) - 4}
               </span>
             )}
-          </div>
+          </button>
 
-          {isOwner && (
+          {isOwner ? (
             <button
               onClick={() => onInvite(task)}
-              className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-600 hover:text-indigo-800 transition-colors"
+              className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-600 hover:text-indigo-800 transition-colors cursor-pointer"
             >
               <UserPlus className="w-3.5 h-3.5" />
               <span>Undang</span>
+            </button>
+          ) : (
+            <button
+              onClick={() => onInvite(task)}
+              className="inline-flex items-center gap-1.5 text-[11px] font-bold text-purple-600 hover:text-purple-800 transition-colors cursor-pointer"
+              title="Lihat daftar anggota kolaborasi"
+            >
+              <Users className="w-3.5 h-3.5" />
+              <span>Lihat Anggota</span>
             </button>
           )}
         </div>
