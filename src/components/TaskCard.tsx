@@ -160,7 +160,7 @@ export function TaskCard({
                       className="w-full flex items-center gap-2.5 px-3 py-2 text-xs font-semibold text-purple-700 hover:bg-purple-50 rounded-xl transition-colors cursor-pointer text-left"
                     >
                       <Users className="w-3.5 h-3.5 text-purple-500 shrink-0" />
-                      <span>Lihat Anggota Lainnya Termasuk Ketua</span>
+                      <span>Lihat Anggota Lainnya</span>
                     </button>
                     <button
                       onClick={() => {
@@ -215,7 +215,7 @@ export function TaskCard({
                       className="w-full flex items-center gap-2.5 px-3 py-2 text-xs font-semibold text-purple-700 hover:bg-purple-50 rounded-xl transition-colors cursor-pointer text-left"
                     >
                       <Users className="w-3.5 h-3.5 text-purple-500 shrink-0" />
-                      <span>Lihat Anggota Lainnya Termasuk Ketua</span>
+                      <span>Lihat Anggota Lainnya</span>
                     </button>
                   )}
                   <button
@@ -355,7 +355,7 @@ export function TaskCard({
                 title="Lihat daftar anggota kelompok & ketua kolaborasi"
               >
                 <Users className="w-3.5 h-3.5" />
-                <span>Lihat Anggota</span>
+                <span>Lihat Anggota Lainnya</span>
               </button>
               <button
                 type="button"
@@ -374,7 +374,7 @@ export function TaskCard({
               title="Lihat siapa saja anggota kelompok & ketua kolaborasi tugas ini"
             >
               <Users className="w-3.5 h-3.5" />
-              <span>Lihat Anggota Lainnya Termasuk Ketua</span>
+              <span>Lihat Anggota Lainnya</span>
             </button>
           )}
         </div>

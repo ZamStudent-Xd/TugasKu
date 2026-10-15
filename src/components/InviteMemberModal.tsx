@@ -297,41 +297,50 @@ export function InviteMemberModal({
     return set;
   }, [task?.id, feedbackMsg, isOpen]);
 
-  if (!isOpen || !task) return null;
-
   const currentMembers = useMemo(() => {
     if (!task) return [];
     const source = [...(task.members || []), ...serverMembers];
     const cleaned = cleanAndDeduplicateMembers(source, registeredStudents);
     return cleaned.sort((a, b) => {
-      if (a.role === "owner") return -1;
-      if (b.role === "owner") return 1;
-      return a.fullName.localeCompare(b.fullName);
+      if (a?.role === "owner") return -1;
+      if (b?.role === "owner") return 1;
+      const nameA = a?.fullName || "";
+      const nameB = b?.fullName || "";
+      return nameA.localeCompare(nameB);
     });
   }, [task?.members, serverMembers, registeredStudents]);
 
+  if (!isOpen || !task) return null;
+
   const getStudentInfo = (m: TaskMember) => {
+    if (!m) return undefined;
     const rawUserId = (m.userId || "").toLowerCase().trim();
     const rawName = (m.fullName || "").toLowerCase().trim();
-    const rawEmail = (m.email || "").toLowerCase().trim();
+    const rawEmail = ((m as any).email || "").toLowerCase().trim();
 
     return registeredStudents.find((s) => {
-      if (s.id && s.id.toLowerCase() === rawUserId) return true;
-      if (s.email && (s.email.toLowerCase().trim() === rawUserId || s.email.toLowerCase().trim() === rawEmail)) return true;
-      if (s.fullName && s.fullName.toLowerCase().trim() === rawName) return true;
-      if (s.nim && (rawName === s.nim.toLowerCase().trim() || rawUserId.includes(s.nim.toLowerCase().trim()))) return true;
+      if (!s) return false;
+      const sId = (s.id || "").toLowerCase().trim();
+      const sEmail = (s.email || "").toLowerCase().trim();
+      const sName = (s.fullName || "").toLowerCase().trim();
+      const sNim = (s.nim || "").toLowerCase().trim();
+
+      if (sId && sId === rawUserId) return true;
+      if (sEmail && (sEmail === rawUserId || (rawEmail && sEmail === rawEmail))) return true;
+      if (sName && sName === rawName) return true;
+      if (sNim && (rawName === sNim || rawUserId.includes(sNim))) return true;
       return false;
     });
   };
 
   const isCurrentUserMember = (m: TaskMember) => {
-    if (!currentUser) return false;
+    if (!currentUser || !m) return false;
     const myId = (currentUser.id || "").toLowerCase().trim();
     const myEmail = (currentUser.email || "").toLowerCase().trim();
     const myName = (currentUser.fullName || "").toLowerCase().trim();
 
     const mUserId = (m.userId || "").toLowerCase().trim();
-    const mEmail = (m.email || "").toLowerCase().trim();
+    const mEmail = ((m as any).email || "").toLowerCase().trim();
     const mName = (m.fullName || "").toLowerCase().trim();
 
     return (
@@ -342,12 +351,22 @@ export function InviteMemberModal({
   };
 
   const isMember = (student: UserProfile) => {
-    return currentMembers.some(
-      (m) =>
-        m.userId === student.id ||
-        m.fullName.toLowerCase().trim() === student.fullName.toLowerCase().trim() ||
-        (student.email && m.fullName.toLowerCase().includes(student.email.split("@")[0].toLowerCase()))
-    );
+    if (!student) return false;
+    const sId = (student.id || "").toLowerCase().trim();
+    const sName = (student.fullName || "").toLowerCase().trim();
+    const sEmail = (student.email || "").toLowerCase().trim();
+    const sPrefix = sEmail ? sEmail.split("@")[0] : "";
+
+    return currentMembers.some((m) => {
+      if (!m) return false;
+      const mId = (m.userId || "").toLowerCase().trim();
+      const mName = (m.fullName || "").toLowerCase().trim();
+      return (
+        (sId && mId === sId) ||
+        (sName && mName === sName) ||
+        (sPrefix && mName.includes(sPrefix))
+      );
+    });
   };
 
   const isPendingInvite = (student: UserProfile) => {
@@ -407,7 +426,7 @@ export function InviteMemberModal({
             <Users className="w-5 h-5" />
           </div>
           <h2 className="text-xl font-bold text-[#1E1B4B]">
-            {isOwner ? "Kolaborasi Tugas Kelompok" : "Daftar Anggota & Ketua Kolaborasi"}
+            {isOwner ? "Kolaborasi Tugas Kelompok" : "Lihat Anggota Lainnya"}
           </h2>
           <p className="text-xs text-gray-500 mt-0.5 line-clamp-1">
             {task.title}
@@ -421,7 +440,7 @@ export function InviteMemberModal({
             </div>
             <div className="text-left text-xs text-purple-950">
               <div className="font-bold flex items-center gap-2">
-                <span>Anggota Kelompok &amp; Ketua Kolaborasi</span>
+                <span>Daftar Anggota Lainnya</span>
                 <span className="text-[10px] bg-purple-200/90 text-purple-800 font-extrabold px-2 py-0.5 rounded-lg">
                   Tergabung
                 </span>
@@ -596,11 +615,11 @@ export function InviteMemberModal({
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-xs font-extrabold uppercase tracking-wider text-gray-700 flex items-center gap-1.5">
               <Users className="w-3.5 h-3.5 text-purple-600" />
-              <span>{isOwner ? "Daftar Anggota & Ketua Kelompok" : "Daftar Anggota Lainnya Termasuk Ketua"} ({currentMembers.length})</span>
+              <span>Daftar Anggota Lainnya ({currentMembers.length})</span>
             </h3>
             <span className="text-[11px] text-gray-400 font-medium">
-              {currentMembers.filter((m) => m.role === "owner").length > 0 ? "1 Ketua • " : ""}
-              {currentMembers.filter((m) => m.role !== "owner").length} Anggota
+              {currentMembers.filter((m) => m?.role === "owner").length > 0 ? "1 Ketua • " : ""}
+              {currentMembers.filter((m) => m?.role !== "owner").length} Anggota
             </span>
           </div>
 
@@ -608,28 +627,29 @@ export function InviteMemberModal({
             {currentMembers.length === 0 ? (
               <p className="text-xs text-gray-400 italic py-2">Belum ada anggota yang bergabung.</p>
             ) : (
-              currentMembers.map((m) => {
+              currentMembers.map((m, idx) => {
                 const info = getStudentInfo(m);
                 const isMe = isCurrentUserMember(m);
-                const avatarSrc = info?.avatarUrl || m.avatarUrl || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(m.fullName)}`;
+                const memberName = m?.fullName || "Mahasiswa";
+                const avatarSrc = info?.avatarUrl || m?.avatarUrl || `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(memberName)}`;
                 const subtitle = info?.nim
                   ? `${info.nim} • ${info.major || "Mahasiswa BSI"}`
-                  : (info?.email || m.email || (m.role === "owner" ? "Ketua Kelompok" : "Mahasiswa BSI"));
+                  : (info?.email || (m as any)?.email || (m?.role === "owner" ? "Ketua Kelompok" : "Mahasiswa BSI"));
 
                 return (
                   <div
-                    key={m.userId || m.fullName}
+                    key={m?.userId || memberName || `mem-${idx}`}
                     className="flex items-center justify-between p-2.5 rounded-2xl bg-white border border-gray-100 hover:border-purple-200 transition-all shadow-2xs"
                   >
                     <div className="flex items-center gap-2.5 min-w-0">
                       <img
                         src={avatarSrc}
-                        alt={m.fullName}
+                        alt={memberName}
                         className="w-9 h-9 rounded-xl object-cover bg-purple-50 ring-1 ring-purple-100 shrink-0"
                       />
                       <div className="min-w-0 text-left">
                         <div className="flex items-center gap-1.5 flex-wrap">
-                          <p className="text-xs font-bold text-[#1E1B4B] truncate">{m.fullName}</p>
+                          <p className="text-xs font-bold text-[#1E1B4B] truncate">{memberName}</p>
                           {isMe && (
                             <span className="px-1.5 py-0.5 rounded-md bg-purple-100 text-purple-700 text-[9px] font-black shrink-0">
                               Anda
@@ -643,7 +663,7 @@ export function InviteMemberModal({
                     </div>
 
                     <div className="flex items-center gap-2 shrink-0">
-                      {m.role === "owner" ? (
+                      {m?.role === "owner" ? (
                         <span className="px-2.5 py-1 rounded-xl bg-amber-100/90 text-amber-900 text-[10px] font-black border border-amber-300 flex items-center gap-1 shadow-2xs shrink-0">
                           <span>👑 Ketua Kolaborasi</span>
                         </span>
