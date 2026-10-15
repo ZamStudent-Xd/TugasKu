@@ -34,7 +34,22 @@ export async function GET(request: NextRequest) {
 
         const { data, error } = await query.order("created_at", { ascending: false });
         if (!error && Array.isArray(data)) {
+          // Ambil profil mahasiswa untuk resolusi pengundang yang sah
+          const profilesMap = new Map<string, any>();
+          try {
+            const { data: profs } = await supabase.from("profiles").select("*");
+            if (Array.isArray(profs)) {
+              for (const p of profs) {
+                if (p.id) profilesMap.set(p.id.toLowerCase(), p);
+                if (p.email) profilesMap.set(p.email.toLowerCase().trim(), p);
+              }
+            }
+          } catch {}
+
           for (const row of data) {
+            const inviterId = (row.invited_by || (row.task_payload as any)?.createdBy || "").toLowerCase().trim();
+            const inviterProf = profilesMap.get(inviterId);
+
             const inv: TaskInvitation = {
               id: row.id,
               taskId: row.task_id,
@@ -45,8 +60,8 @@ export async function GET(request: NextRequest) {
               status: row.status as any,
               expiresAt: row.expires_at,
               invitedBy: row.invited_by,
-              inviterName: row.inviter_name,
-              inviterAvatar: row.inviter_avatar,
+              inviterName: inviterProf?.full_name || row.inviter_name,
+              inviterAvatar: inviterProf?.avatar_url || row.inviter_avatar,
               createdAt: row.created_at,
             };
             invitationsMap.set(inv.id, inv);

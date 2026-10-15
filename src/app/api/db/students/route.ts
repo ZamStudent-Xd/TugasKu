@@ -245,16 +245,8 @@ export async function POST(request: NextRequest) {
           console.warn("[API STUDENTS] PROFILE_RECORD upsert note:", e);
         }
 
-        // Sinkronisasi avatar & nama di tabel collaboration_invitations secara realtime
+        // Sinkronisasi avatar & nama di tabel collaboration_invitations secara realtime HANYA untuk undangan yang DIKIRIM oleh user ini (invited_by)
         try {
-          await supabase
-            .from("collaboration_invitations")
-            .update({
-              inviter_name: user.fullName,
-              inviter_avatar: user.avatarUrl,
-            })
-            .eq("invited_email", cleanEmail);
-
           if (targetProfileId) {
             await supabase
               .from("collaboration_invitations")
@@ -262,7 +254,7 @@ export async function POST(request: NextRequest) {
                 inviter_name: user.fullName,
                 inviter_avatar: user.avatarUrl,
               })
-              .eq("invited_by", targetProfileId);
+              .or(`invited_by.eq.${targetProfileId},invited_by.eq.${cleanEmail}`);
           }
         } catch {
           // ignore

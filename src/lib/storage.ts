@@ -1752,6 +1752,13 @@ export async function fetchTaskInvitations(currentUserEmail?: string): Promise<T
 
   const invitationsMap = new Map<string, TaskInvitation>();
 
+  let allStudents: UserProfile[] = [];
+  try {
+    allStudents = await fetchRegisteredStudents();
+  } catch {
+    allStudents = getAllRegisteredStudents();
+  }
+
   // 1. Ambil langsung dari Supabase Cloud jika terkonfigurasi (sumber data utama)
   if (isSupabaseConfigured && supabase) {
     try {
@@ -1774,6 +1781,31 @@ export async function fetchTaskInvitations(currentUserEmail?: string): Promise<T
           ) {
             continue;
           }
+
+          // Pastikan inviter_name dan inviter_avatar adalah milik pengundang (BUKAN milik penerima undangan)
+          let finalInviterName = row.inviter_name;
+          let finalInviterAvatar = row.inviter_avatar;
+
+          const inviterId = (row.invited_by || (row.task_payload as any)?.createdBy || "").toLowerCase().trim();
+          const inviterProfile = allStudents.find((s) => {
+            if (inviterId) {
+              if (s.id && s.id.toLowerCase() === inviterId) return true;
+              if (s.email && s.email.toLowerCase().trim() === inviterId) return true;
+            }
+            return false;
+          });
+
+          if (inviterProfile) {
+            finalInviterName = inviterProfile.fullName || finalInviterName;
+            finalInviterAvatar = inviterProfile.avatarUrl || finalInviterAvatar;
+          } else if (row.task_payload?.members) {
+            const ownerMem = row.task_payload.members.find((m: any) => m.role === "owner");
+            if (ownerMem) {
+              finalInviterName = ownerMem.fullName || finalInviterName;
+              finalInviterAvatar = ownerMem.avatarUrl || finalInviterAvatar;
+            }
+          }
+
           const inv: TaskInvitation = {
             id: row.id,
             taskId: row.task_id,
@@ -1784,8 +1816,8 @@ export async function fetchTaskInvitations(currentUserEmail?: string): Promise<T
             status: row.status as any,
             expiresAt: row.expires_at,
             invitedBy: row.invited_by,
-            inviterName: row.inviter_name,
-            inviterAvatar: row.inviter_avatar,
+            inviterName: finalInviterName,
+            inviterAvatar: finalInviterAvatar,
             createdAt: row.created_at,
           };
           invitationsMap.set(inv.id, inv);
@@ -1825,6 +1857,18 @@ export async function fetchTaskInvitations(currentUserEmail?: string): Promise<T
           cloudInv.status !== "pending"
       );
       if (!alreadyHandledInCloud) {
+        const inviterId = (inv.invitedBy || "").toLowerCase().trim();
+        const inviterProfile = allStudents.find((s) => {
+          if (inviterId) {
+            if (s.id && s.id.toLowerCase() === inviterId) return true;
+            if (s.email && s.email.toLowerCase().trim() === inviterId) return true;
+          }
+          return false;
+        });
+        if (inviterProfile) {
+          inv.inviterName = inviterProfile.fullName || inv.inviterName;
+          inv.inviterAvatar = inviterProfile.avatarUrl || inv.inviterAvatar;
+        }
         invitationsMap.set(inv.id, inv);
       }
     }
@@ -2547,13 +2591,18 @@ export async function syncUserProfileToCloud(user: UserProfile): Promise<void> {
       });
 
       // Update juga avatar di baris tugas yang pernah di-invite oleh user ini
-      await supabase
-        .from("collaboration_invitations")
-        .update({
-          inviter_name: user.fullName,
-          inviter_avatar: user.avatarUrl,
-        })
-        .eq("invited_by", user.id || cleanEmail);
+      if (user.id || cleanEmail) {
+        const query = user.id && user.id !== cleanEmail
+          ? `invited_by.eq.${user.id},invited_by.eq.${cleanEmail}`
+          : `invited_by.eq.${user.id || cleanEmail}`;
+        await supabase
+          .from("collaboration_invitations")
+          .update({
+            inviter_name: user.fullName,
+            inviter_avatar: user.avatarUrl,
+          })
+          .or(query);
+      }
     } catch (e) {
       console.warn("[SYNC_PROFILE] Gagal sync PROFILE_RECORD ke Supabase:", e);
     }
