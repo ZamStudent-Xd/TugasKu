@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { saveRegisteredStudentToDb, searchRegisteredStudentsFromDb } from "@/lib/serverDb";
+import { saveRegisteredStudentToDb, searchRegisteredStudentsFromDb, getAllStudentsFromDb } from "@/lib/serverDb";
 import { UserProfile } from "@/types";
 import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
@@ -21,20 +21,19 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const query = (searchParams.get("q") || searchParams.get("search") || "").trim();
 
-    if (!query) {
-      return NextResponse.json({ success: true, students: [] });
-    }
-
     const studentsMap = new Map<string, UserProfile>();
 
     // 1. Ambil dari Supabase PostgreSQL Cloud
     const supabase = getSupabase();
     if (supabase) {
       try {
-        const { data, error } = await supabase
-          .from("profiles")
-          .select("*")
-          .or(`full_name.ilike.%${query}%,nim.ilike.%${query}%,email.ilike.%${query}%`);
+        let supaQuery = supabase.from("profiles").select("*");
+        if (query) {
+          supaQuery = supaQuery.or(`full_name.ilike.%${query}%,nim.ilike.%${query}%,email.ilike.%${query}%`);
+        } else {
+          supaQuery = supaQuery.limit(100);
+        }
+        const { data, error } = await supaQuery;
 
         if (!error && Array.isArray(data)) {
           for (const row of data) {
@@ -59,7 +58,7 @@ export async function GET(request: NextRequest) {
 
     // 2. Ambil dari Server Database lokal (sebagai fallback/cadangan)
     try {
-      const localStudents = searchRegisteredStudentsFromDb(query);
+      const localStudents = query ? searchRegisteredStudentsFromDb(query) : getAllStudentsFromDb();
       for (const s of localStudents) {
         const key = s.email.toLowerCase().trim();
         if (!studentsMap.has(key)) {
@@ -70,10 +69,17 @@ export async function GET(request: NextRequest) {
       // ignore
     }
 
-    return NextResponse.json({
-      success: true,
-      students: Array.from(studentsMap.values()),
-    });
+    return NextResponse.json(
+      {
+        success: true,
+        students: Array.from(studentsMap.values()),
+      },
+      {
+        headers: {
+          "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+        },
+      }
+    );
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "Gagal mencari data mahasiswa";
     return NextResponse.json({ success: false, error: msg }, { status: 500 });
@@ -90,6 +96,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: "Data mahasiswa tidak lengkap" }, { status: 400 });
     }
 
+    const cleanEmail = user.email.toLowerCase().trim();
+
     // 1. Simpan ke Supabase (Cloud Database)
     const supabase = getSupabase();
     if (supabase) {
@@ -98,43 +106,97 @@ export async function POST(request: NextRequest) {
 
         // Jika ada password, daftarkan ke auth.users
         if (password) {
-          const { data: authData } = await supabase.auth.signUp({
-            email: user.email,
-            password: password,
-            options: {
-              data: {
-                full_name: user.fullName,
-                nim: user.nim,
-                major: user.major,
-                semester: user.semester,
-                campus: user.campus,
-                avatar_url: user.avatarUrl,
+          try {
+            const { data: authData } = await supabase.auth.signUp({
+              email: cleanEmail,
+              password: password,
+              options: {
+                data: {
+                  full_name: user.fullName,
+                  nim: user.nim,
+                  major: user.major,
+                  semester: user.semester,
+                  campus: user.campus,
+                  avatar_url: user.avatarUrl,
+                },
               },
-            },
-          });
+            });
 
-          if (authData?.user?.id) {
-            authUserId = authData.user.id;
-            user.id = authUserId;
+            if (authData?.user?.id) {
+              authUserId = authData.user.id;
+              user.id = authUserId;
+            }
+          } catch {
+            // ignore
           }
         }
 
-        // Upsert ke public.profiles
-        const profileId = authUserId || (isValidUuid(user.id) ? user.id : crypto.randomUUID());
-        user.id = profileId;
+        // Cari ID profil yang sudah ada di tabel profiles Supabase berdasarkan email atau ID
+        let targetProfileId: string | null = authUserId || (isValidUuid(user.id) ? user.id : null);
+        if (!targetProfileId) {
+          const { data: existingProf } = await supabase
+            .from("profiles")
+            .select("id")
+            .eq("email", cleanEmail)
+            .maybeSingle();
 
-        await supabase.from("profiles").upsert({
-          id: profileId,
-          full_name: user.fullName,
-          email: user.email,
-          nim: user.nim,
-          major: user.major,
-          semester: user.semester,
-          campus: user.campus,
-          avatar_url: user.avatarUrl,
-        });
+          if (existingProf?.id) {
+            targetProfileId = existingProf.id;
+          }
+        }
+
+        if (targetProfileId) {
+          user.id = targetProfileId;
+          await supabase
+            .from("profiles")
+            .update({
+              full_name: user.fullName,
+              nim: user.nim,
+              major: user.major,
+              semester: user.semester,
+              campus: user.campus,
+              avatar_url: user.avatarUrl,
+            })
+            .eq("id", targetProfileId);
+        } else {
+          const newId = crypto.randomUUID();
+          user.id = newId;
+          await supabase.from("profiles").insert({
+            id: newId,
+            full_name: user.fullName,
+            email: cleanEmail,
+            nim: user.nim,
+            major: user.major,
+            semester: user.semester,
+            campus: user.campus,
+            avatar_url: user.avatarUrl,
+          });
+        }
+
+        // Sinkronisasi avatar & nama di tabel collaboration_invitations secara realtime
+        try {
+          await supabase
+            .from("collaboration_invitations")
+            .update({
+              inviter_name: user.fullName,
+              inviter_avatar: user.avatarUrl,
+            })
+            .eq("invited_email", cleanEmail);
+
+          if (targetProfileId) {
+            await supabase
+              .from("collaboration_invitations")
+              .update({
+                inviter_name: user.fullName,
+                inviter_avatar: user.avatarUrl,
+              })
+              .eq("invited_by", targetProfileId);
+          }
+        } catch {
+          // ignore
+        }
       } catch (err) {
-        console.warn("[API STUDENTS] Supabase upsert note:", err);
+        console.warn("[API STUDENTS] Supabase profile sync note:", err);
       }
     }
 

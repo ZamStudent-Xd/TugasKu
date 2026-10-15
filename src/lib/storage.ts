@@ -1961,19 +1961,27 @@ export async function fetchRegisteredStudents(query?: string): Promise<UserProfi
     }
   }
 
-  // 1.5 Ambil dari Server Database API (yang juga memeriksa Supabase di server)
+  // 1.5 Ambil dari Server Database API (dengan cache: 'no-store' agar selalu realtime)
   if (typeof window !== "undefined") {
     try {
-      const qParam = query && query.trim() ? `?q=${encodeURIComponent(query.trim())}` : "";
-      const res = await fetch(`/api/db/students${qParam}`);
+      const qParam = query && query.trim() ? `?q=${encodeURIComponent(query.trim())}&_t=${Date.now()}` : `?_t=${Date.now()}`;
+      const res = await fetch(`/api/db/students${qParam}`, { cache: "no-store" });
       if (res.ok) {
         const json = await res.json();
         if (json.success && Array.isArray(json.students)) {
           for (const s of json.students) {
             const clean = s.email?.toLowerCase().trim();
-            if (clean && !seenEmails.has(clean)) {
-              list.push(s);
-              seenEmails.add(clean);
+            if (clean) {
+              const existingIdx = list.findIndex((item) => item.email.toLowerCase().trim() === clean);
+              if (existingIdx >= 0) {
+                // Perbarui avatar & data jika server memiliki avatarUrl yang lebih baru
+                if (s.avatarUrl) {
+                  list[existingIdx] = { ...list[existingIdx], ...s };
+                }
+              } else {
+                list.push(s);
+                seenEmails.add(clean);
+              }
             }
           }
         }
@@ -1983,12 +1991,19 @@ export async function fetchRegisteredStudents(query?: string): Promise<UserProfi
     }
   }
 
-  // 2. Gabungkan dengan akun lokal yang tersimpan
+  // 2. Gabungkan dengan akun lokal dan sinkronkan avatar cloud ke cache lokal
   const localAccounts = getRegisteredAccounts();
   for (const acc of localAccounts) {
     if (acc.user && acc.user.email) {
       const clean = acc.user.email.toLowerCase().trim();
-      if (!seenEmails.has(clean)) {
+      const cloudStudent = list.find((item) => item.email.toLowerCase().trim() === clean);
+      if (cloudStudent) {
+        // Sinkronkan avatar cloud terbaru ke akun lokal
+        if (cloudStudent.avatarUrl && acc.user.avatarUrl !== cloudStudent.avatarUrl) {
+          acc.user.avatarUrl = cloudStudent.avatarUrl;
+          acc.user.fullName = cloudStudent.fullName;
+        }
+      } else if (!seenEmails.has(clean)) {
         if (!query || query.trim() === "" ||
             acc.user.fullName.toLowerCase().includes(query.toLowerCase()) ||
             (acc.user.nim && acc.user.nim.toLowerCase().includes(query.toLowerCase())) ||
@@ -1999,6 +2014,7 @@ export async function fetchRegisteredStudents(query?: string): Promise<UserProfi
       }
     }
   }
+  saveRegisteredAccounts(localAccounts);
 
   return list;
 }
@@ -2153,43 +2169,95 @@ export async function updateUserProfile(updates: Partial<UserProfile>): Promise<
     ...current,
     ...updates,
   };
+  const cleanEmail = updated.email.toLowerCase().trim();
 
-  // Sinkronkan ke Server DB
+  // 1. Sinkronkan ke Server DB via API route (await agar selesai sebelum fungsi kembali)
   if (typeof window !== "undefined") {
-    fetch("/api/db/students", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user: updated }),
-    }).catch(() => {});
+    try {
+      await fetch("/api/db/students", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user: updated }),
+      });
+    } catch (e) {
+      console.warn("Gagal simpan profil ke server DB:", e);
+    }
   }
 
+  // 2. Sinkronkan langsung ke Supabase Cloud (tabel profiles & auth metadata)
   if (isSupabaseConfigured && supabase) {
     try {
-      const { data: sessionData } = await supabase.auth.getSession();
-      const userId = sessionData?.session?.user?.id;
-      if (userId) {
-        await supabase
-          .from("profiles")
-          .update({
+      // Update langsung berdasarkan email di tabel profiles
+      const { error: profErr } = await supabase
+        .from("profiles")
+        .update({
+          full_name: updated.fullName,
+          nim: updated.nim,
+          major: updated.major,
+          semester: updated.semester,
+          campus: updated.campus,
+          avatar_url: updated.avatarUrl,
+        })
+        .eq("email", cleanEmail);
+
+      if (profErr) {
+        console.warn("[UPDATE_PROFILE] Supabase profile update error:", profErr);
+      }
+
+      // Update auth user metadata jika ada session aktif
+      try {
+        await supabase.auth.updateUser({
+          data: {
             full_name: updated.fullName,
             nim: updated.nim,
             major: updated.major,
             semester: updated.semester,
             campus: updated.campus,
             avatar_url: updated.avatarUrl,
+          },
+        });
+      } catch {}
+
+      // Sinkronisasi avatar & nama inviter di collaboration_invitations
+      try {
+        await supabase
+          .from("collaboration_invitations")
+          .update({
+            inviter_name: updated.fullName,
+            inviter_avatar: updated.avatarUrl,
           })
-          .eq("id", userId);
-      }
+          .eq("invited_email", cleanEmail);
+      } catch {}
     } catch (err) {
       console.warn("Gagal update profil di Supabase:", err);
     }
   }
 
+  // 3. Perbarui avatar & nama di seluruh tugas lokal yang diikuti pengguna
+  const localTasks = getLocalTasks();
+  let tasksChanged = false;
+  for (const t of localTasks) {
+    if (Array.isArray(t.members)) {
+      for (const m of t.members) {
+        const mEmail = ((m as any).email || m.userId || "").toLowerCase().trim();
+        if (m.userId === updated.id || mEmail === cleanEmail || m.fullName === updated.fullName) {
+          m.avatarUrl = updated.avatarUrl;
+          m.fullName = updated.fullName;
+          tasksChanged = true;
+        }
+      }
+    }
+  }
+  if (tasksChanged) {
+    saveLocalTasks(localTasks);
+  }
+
+  // 4. Perbarui sesi lokal
   saveCurrentUser(updated);
 
   const accounts = getRegisteredAccounts();
   const nextAccounts = accounts.map((acc) => {
-    if (acc.user.id === updated.id || acc.user.email.toLowerCase() === updated.email.toLowerCase()) {
+    if (acc.user.id === updated.id || acc.user.email.toLowerCase() === cleanEmail) {
       return {
         ...acc,
         user: updated,

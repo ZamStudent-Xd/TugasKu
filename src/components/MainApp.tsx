@@ -440,6 +440,7 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
           .channel("tugasku-realtime")
           .on("postgres_changes", { event: "*", schema: "public", table: "collaboration_invitations" }, () => syncRealtime())
           .on("postgres_changes", { event: "*", schema: "public", table: "tasks" }, () => syncRealtime())
+          .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, () => syncRealtime())
           .subscribe();
       } catch {}
     }

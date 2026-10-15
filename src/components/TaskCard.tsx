@@ -257,15 +257,25 @@ export function TaskCard({
         <div className="mt-4 pt-3 border-t border-gray-100 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="text-[11px] text-gray-400 font-medium">Anggota:</span>
-            <div className="flex -space-x-2 overflow-hidden">
+            <div className="flex -space-x-2 overflow-hidden items-center">
               {(task.members || []).slice(0, 4).map((m, idx) => (
-                <div
-                  key={idx}
-                  title={`${m.fullName} (${m.role})`}
-                  className="inline-block h-6 w-6 rounded-full ring-2 ring-white bg-indigo-500 text-white text-[10px] font-bold flex items-center justify-center"
-                >
-                  {m.fullName.charAt(0)}
-                </div>
+                m.avatarUrl ? (
+                  <img
+                    key={idx}
+                    src={m.avatarUrl}
+                    alt={m.fullName}
+                    title={`${m.fullName} (${m.role === "owner" ? "Ketua Kelompok" : "Anggota"})`}
+                    className="inline-block h-6 w-6 rounded-full ring-2 ring-white object-cover bg-indigo-50 shrink-0"
+                  />
+                ) : (
+                  <div
+                    key={idx}
+                    title={`${m.fullName} (${m.role === "owner" ? "Ketua Kelompok" : "Anggota"})`}
+                    className="inline-block h-6 w-6 rounded-full ring-2 ring-white bg-indigo-500 text-white text-[10px] font-bold flex items-center justify-center shrink-0"
+                  >
+                    {m.fullName.charAt(0)}
+                  </div>
+                )
               ))}
             </div>
             {(task.members?.length || 0) > 4 && (

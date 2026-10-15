@@ -4,6 +4,7 @@ import React, { useState, useMemo, useEffect } from "react";
 import { X, UserPlus, Users, Copy, Check, Trash2, Search, AlertCircle, CheckCircle2, Loader2, Clock } from "lucide-react";
 import { Task, UserProfile } from "@/types";
 import { fetchRegisteredStudents, getCurrentUser, getTaskInvitations } from "@/lib/storage";
+import { isSupabaseConfigured, supabase } from "@/lib/supabaseClient";
 
 interface InviteMemberModalProps {
   isOpen: boolean;
@@ -107,6 +108,32 @@ export function InviteMemberModal({
 
     return () => {
       isMounted = false;
+    };
+  }, [isOpen, debouncedQuery]);
+ 
+  // Realtime subscription untuk mendeteksi pembaruan profil / avatar mahasiswa lain secara langsung
+  useEffect(() => {
+    if (!isOpen || !isSupabaseConfigured || !supabase) return;
+
+    const client = supabase;
+    const channel = client
+      .channel("invite-modal-profiles-sync")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "profiles" },
+        () => {
+          const clean = debouncedQuery.trim();
+          if (clean.length > 0) {
+            fetchRegisteredStudents(clean).then((fresh) => {
+              setRegisteredStudents(fresh);
+            });
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      client.removeChannel(channel);
     };
   }, [isOpen, debouncedQuery]);
 
