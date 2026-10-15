@@ -186,6 +186,17 @@ export function recordDeletedTaskId(id: string): void {
   } catch {}
 }
 
+export function unrecordDeletedTaskId(id: string): void {
+  if (typeof window === "undefined" || !id) return;
+  try {
+    const current = getDeletedTaskIds();
+    if (current.has(id)) {
+      current.delete(id);
+      localStorage.setItem(DELETED_TASKS_KEY, JSON.stringify(Array.from(current)));
+    }
+  } catch {}
+}
+
 /**
  * Mengecek apakah pengguna saat ini adalah pemilik / pembuat tugas kelompok atau tugas individu.
  * Mencocokkan ID, email, NIM, dan role "owner" pada daftar anggota tugas.
@@ -475,6 +486,7 @@ export async function fetchCourses(userParam?: UserProfile | null): Promise<Cour
 
   // 4. Ambil mata kuliah dari kolaborasi Supabase (collaboration_invitations)
   // HANYA buatkan placeholder jika mata kuliah tersebut BENAR-BENAR BELUM ADA di daftar pengguna!
+  const deletedTaskIds = getDeletedTaskIds();
   if (isSupabaseConfigured && supabase && (userId || cleanEmail)) {
     try {
       const { data: collabRows } = await supabase
@@ -494,6 +506,12 @@ export async function fetchCourses(userParam?: UserProfile | null): Promise<Cour
 
           const isMember =
             (cleanEmail && rowInvitedEmail === cleanEmail && row.status === "accepted");
+
+          // Jika pengguna adalah anggota yang diterima, pulihkan ID tugas dari rekaman terhapus
+          if (isMember && row.task_id && deletedTaskIds.has(row.task_id)) {
+            deletedTaskIds.delete(row.task_id);
+            unrecordDeletedTaskId(row.task_id);
+          }
 
           // Abaikan record profil
           if (row.task_id === "PROFILE_RECORD" || row.id.startsWith("profile-")) {
@@ -547,7 +565,6 @@ export async function fetchCourses(userParam?: UserProfile | null): Promise<Cour
   }
 
   // 5. Pastikan mata kuliah dari tugas kolaborasi lokal otomatis tersedia jika belum ada
-  const deletedTaskIds = getDeletedTaskIds();
   const currentTasks = getLocalTasks().filter((t) => !deletedTaskIds.has(t.id));
   for (const t of currentTasks) {
     const isTaskOfUser =
@@ -930,8 +947,7 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
             typeof t.title !== "string" ||
             t.title.trim() === "" ||
             t.id?.startsWith("course-") ||
-            t.id?.startsWith("profile-") ||
-            deletedTaskIds.has(t.id)
+            t.id?.startsWith("profile-")
           ) {
             continue;
           }
@@ -939,14 +955,27 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
             const rowInvitedBy = (row.invited_by || "").toLowerCase().trim();
             const rowInviterName = (row.inviter_name || "").toLowerCase().trim();
 
+            const isAcceptedMember =
+              (cleanEmail && rowInvitedEmail === cleanEmail && row.status === "accepted") ||
+              (userNim && rowInvitedEmail.startsWith(userNim + "@") && row.status === "accepted");
+
+            // Jika user secara aktif berstatus 'accepted' di cloud, maka tugas ini BUKAN tugas yang terhapus!
+            if (isAcceptedMember && deletedTaskIds.has(t.id)) {
+              deletedTaskIds.delete(t.id);
+              unrecordDeletedTaskId(t.id);
+            }
+
+            if (deletedTaskIds.has(t.id)) {
+              continue;
+            }
+
             const isInviter =
               (userId && (rowInvitedBy === userId.toLowerCase() || t.createdBy === userId)) ||
               (cleanEmail && (rowInvitedBy === cleanEmail || t.createdBy?.toLowerCase().trim() === cleanEmail)) ||
               (userFullName && rowInviterName === userFullName);
 
             const isMember =
-              (cleanEmail && rowInvitedEmail === cleanEmail && row.status === "accepted") ||
-              (userNim && rowInvitedEmail.startsWith(userNim + "@") && row.status === "accepted") ||
+              isAcceptedMember ||
               (t.members && t.members.some((m) =>
                 (userId && m.userId === userId) ||
                 (cleanEmail && m.userId?.toLowerCase().trim() === cleanEmail) ||
@@ -1904,6 +1933,11 @@ export async function sendTaskInvitation(data: {
     };
   }
 
+  // Bersihkan undangan lama untuk email ini pada tugas yang sama agar data selalu segar
+  const filteredInvitations = invitations.filter(
+    (inv) => !(inv.taskId === data.taskId && inv.invitedEmail.toLowerCase() === cleanEmail)
+  );
+
   const newInvitation: TaskInvitation = {
     id: `inv-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
     taskId: data.taskId,
@@ -1919,12 +1953,20 @@ export async function sendTaskInvitation(data: {
     createdAt: new Date().toISOString(),
   };
 
-  invitations.unshift(newInvitation);
-  saveTaskInvitations(invitations);
+  filteredInvitations.unshift(newInvitation);
+  saveTaskInvitations(filteredInvitations);
 
   // 1. Simpan langsung ke Supabase Cloud jika terkonfigurasi
   if (isSupabaseConfigured && supabase) {
     try {
+      // Hapus row undangan lama yang mungkin tersisa untuk email ini pada tugas yang sama
+      await supabase
+        .from("collaboration_invitations")
+        .delete()
+        .eq("task_id", newInvitation.taskId)
+        .eq("invited_email", cleanEmail)
+        .neq("id", newInvitation.id);
+
       await supabase.from("collaboration_invitations").upsert({
         id: newInvitation.id,
         task_id: newInvitation.taskId,
@@ -1988,6 +2030,23 @@ export async function acceptTaskInvitation(
     }
   }
 
+  // Fallback ke Supabase task-base jika task_payload belum lengkap di row undangan
+  if ((!taskToJoin || !taskToJoin.title) && isSupabaseConfigured && supabase && invRow?.task_id) {
+    try {
+      const { data: baseRow } = await supabase
+        .from("collaboration_invitations")
+        .select("*")
+        .eq("id", `task-base-${invRow.task_id}`)
+        .maybeSingle();
+      if (baseRow && baseRow.task_payload) {
+        taskToJoin = { ...(baseRow.task_payload as Task) };
+        courseNameToAdd = courseNameToAdd || baseRow.course_name || taskToJoin?.courseName || "";
+      }
+    } catch (err) {
+      console.warn("[INVITATIONS] Supabase baseRow fallback note:", err);
+    }
+  }
+
   // Fallback ke penyimpanan lokal jika taskToJoin belum ada
   if (!taskToJoin) {
     const localInvs = getTaskInvitations();
@@ -2000,6 +2059,12 @@ export async function acceptTaskInvitation(
         taskToJoin = { ...match };
       }
     }
+  }
+
+  // Hapus tugas ini dari deletedTaskIds seketika agar tidak terblokir lagi
+  const targetTaskId = invRow?.task_id || (invRow?.task_payload as any)?.id || taskToJoin?.id;
+  if (targetTaskId) {
+    unrecordDeletedTaskId(targetTaskId);
   }
 
   // Jika masih belum ada, buat task dari info baris undangan
@@ -2135,6 +2200,7 @@ export async function acceptTaskInvitation(
 
   // 6. Simpan task yang sudah digabungkan ke localStorage pengguna ini (dengan courseId yang sudah tepat)
   if (taskToJoin) {
+    unrecordDeletedTaskId(taskToJoin.id);
     const localTasks = getLocalTasks();
     const tIdx = localTasks.findIndex((t) => t.id === taskToJoin!.id);
     if (tIdx >= 0) {
