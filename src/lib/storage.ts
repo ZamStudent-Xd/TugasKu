@@ -2651,7 +2651,7 @@ export async function loginStudent(
 
       return {
         success: false,
-        error: "Akun belum terdaftar atau telah dihapus dari database. Silakan daftar terlebih dahulu.",
+        error: "Akun belum terdaftar. Silakan daftar terlebih dahulu.",
       };
     }
 
