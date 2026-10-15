@@ -816,7 +816,8 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
       }
     } else if (type === "course") {
       try {
-        const res = await deleteCourse(id, user);
+        const targetCourseObj = courses.find((c) => c.id === id);
+        const res = await deleteCourse(id, user, targetCourseObj);
         setCourses(res.courses);
         setTasks(res.tasks);
         if (selectedCourseId === id) {
@@ -843,7 +844,8 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
       const matchedStudent = allStudents.find(
         (s) =>
           s.email.toLowerCase().trim() === cleanTarget ||
-          s.fullName.toLowerCase().trim() === cleanTarget
+          s.fullName.toLowerCase().trim() === cleanTarget ||
+          (s.nim && (s.nim.toLowerCase().trim() === cleanTarget || cleanTarget.includes(s.nim.toLowerCase().trim())))
       );
 
       const targetEmail = matchedStudent ? matchedStudent.email : emailOrName;

@@ -199,9 +199,11 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ success: false, error: "ID mata kuliah diperlukan" }, { status: 400 });
     }
 
+    const courseNameParam = (searchParams.get("courseName") || searchParams.get("name") || "").toLowerCase().trim();
+
     const db = getServerDb();
     const targetCourse = db.courses.find((c) => c.id === courseId);
-    const targetCourseName = targetCourse?.name?.toLowerCase().trim();
+    const targetCourseName = courseNameParam || targetCourse?.name?.toLowerCase().trim();
 
     // Hapus mata kuliah yang ditargetkan dari daftar mata kuliah
     db.courses = db.courses.filter((c) => c.id !== courseId);
@@ -224,6 +226,7 @@ export async function DELETE(request: NextRequest) {
     db.tasks = db.tasks.filter((t) => {
       const isLinked =
         t.courseId === courseId ||
+        (t.courseId && courseId && (t.courseId.includes(courseId) || courseId.includes(t.courseId))) ||
         (targetCourseName && t.courseName?.toLowerCase().trim() === targetCourseName);
 
       if (!isLinked) return true; // Tugas di mata kuliah lain, tetap biarkan
@@ -292,15 +295,21 @@ export async function DELETE(request: NextRequest) {
           if (Array.isArray(collabRows)) {
             for (const row of collabRows) {
               const rowCourse = (row.course_name || row.task_payload?.courseName || "").toLowerCase().trim();
+              const rowCourseId = (row.task_payload?.courseId || "").toLowerCase().trim();
               const isMatchCourse =
                 (targetCourseName && rowCourse === targetCourseName) ||
-                row.task_payload?.courseId === courseId;
+                rowCourseId === courseId.toLowerCase() ||
+                (rowCourseId && (rowCourseId.includes(courseId.toLowerCase()) || courseId.toLowerCase().includes(rowCourseId)));
 
               if (isMatchCourse) {
                 const rowEmail = (row.invited_email || "").toLowerCase().trim();
                 const isTargetRow =
-                  (effectiveEmail && rowEmail === effectiveEmail) ||
-                  (effectiveNim && (rowEmail.startsWith(effectiveNim + "@") || rowEmail.includes(effectiveNim)));
+                  !row.id.startsWith("task-base-") &&
+                  (
+                    (effectiveEmail && rowEmail === effectiveEmail) ||
+                    (effectiveNim && (rowEmail.startsWith(effectiveNim + "@") || rowEmail.includes(effectiveNim))) ||
+                    (effectiveUserId && row.task_payload?.members?.some((m: any) => m.userId === effectiveUserId))
+                  );
 
                 if (isTargetRow) {
                   await supabase.from("collaboration_invitations").delete().eq("id", row.id);
