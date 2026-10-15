@@ -16,8 +16,8 @@ import {
 } from "lucide-react";
 import { UserProfile } from "@/types";
 
-// Helper untuk kompresi dan resize gambar agar aman dan ringan di localStorage
-function compressImage(file: File, maxWidth = 400, maxHeight = 400, quality = 0.85): Promise<string> {
+// Helper untuk kompresi dan resize gambar agar aman, cepat, dan ringan
+function compressImage(file: File, maxWidth = 240, maxHeight = 240, quality = 0.8): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.readAsDataURL(file);
@@ -121,7 +121,7 @@ export function ProfileModal({
     setUploadError(null);
 
     try {
-      const compressedDataUrl = await compressImage(file, 400, 400, 0.85);
+      const compressedDataUrl = await compressImage(file, 240, 240, 0.8);
       setAvatarUrl(compressedDataUrl);
     } catch {
       setUploadError("Gagal memproses gambar. Silakan coba file lain.");

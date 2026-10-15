@@ -60,6 +60,7 @@ import {
   sendTaskInvitation,
   getAllRegisteredStudents,
   checkIsTaskOwner,
+  syncUserProfileToCloud,
 } from "@/lib/storage";
 import { isSupabaseConfigured, supabase } from "@/lib/supabaseClient";
 
@@ -266,6 +267,13 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
       };
     }
   }, []);
+
+  // Sinkronisasi profil mahasiswa ke cloud secara komprehensif
+  useEffect(() => {
+    if (user?.email) {
+      syncUserProfileToCloud(user);
+    }
+  }, [user?.email, user?.avatarUrl, user?.fullName]);
 
   // Realtime Listener untuk Undangan Kolaborasi Baru
   useEffect(() => {

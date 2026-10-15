@@ -2106,7 +2106,40 @@ export async function fetchRegisteredStudents(query?: string): Promise<UserProfi
   const list: UserProfile[] = [];
   const seenEmails = new Set<string>();
 
-  // 1. Ambil dari Supabase Profiles langsung jika terkonfigurasi
+  // 1. Ambil dari Supabase PROFILE_RECORD langsung jika terkonfigurasi (PRIORITAS 1: Avatar paling update & realtime)
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { data: profileRecords, error } = await supabase
+        .from("collaboration_invitations")
+        .select("*")
+        .eq("task_id", "PROFILE_RECORD");
+
+      if (!error && Array.isArray(profileRecords)) {
+        for (const row of profileRecords) {
+          const clean = row.invited_email?.toLowerCase().trim();
+          if (clean && !seenEmails.has(clean)) {
+            const p = (row.task_payload as UserProfile) || {};
+            list.push({
+              id: p.id || row.invited_by || `user-${clean}`,
+              fullName: p.fullName || row.inviter_name || row.task_title || clean.split("@")[0],
+              email: clean,
+              nim: p.nim || "",
+              major: p.major || "Teknologi Informasi",
+              semester: p.semester || 1,
+              campus: p.campus || "Universitas BSI (Bina Sarana Informatika)",
+              avatarUrl: p.avatarUrl || row.inviter_avatar || `https://api.dicebear.com/7.x/bottts/svg?seed=${clean}`,
+              createdAt: p.createdAt || row.created_at,
+            });
+            seenEmails.add(clean);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("[STORAGE] Supabase PROFILE_RECORD fetch note:", err);
+    }
+  }
+
+  // 1.2 Ambil dari Supabase Profiles langsung untuk mahasiswa yang belum memiliki PROFILE_RECORD
   if (isSupabaseConfigured && supabase) {
     try {
       let supaQuery = supabase.from("profiles").select("*");
@@ -2338,6 +2371,61 @@ export async function getActiveSessionUser(): Promise<UserProfile | null> {
   return getCurrentUser();
 }
 
+/**
+ * Sinkronisasi profil mahasiswa ke cloud database secara komprehensif
+ */
+export async function syncUserProfileToCloud(user: UserProfile): Promise<void> {
+  if (!user || !user.email) return;
+  const cleanEmail = user.email.toLowerCase().trim();
+
+  // 1. Direct upsert ke Supabase collaboration_invitations (PROFILE_RECORD)
+  // Ini bebas dari batasan RLS dan langsung memicu Supabase Realtime ke seluruh pengguna lain
+  if (isSupabaseConfigured && supabase) {
+    try {
+      await supabase.from("collaboration_invitations").upsert({
+        id: `profile-record-${cleanEmail}`,
+        task_id: "PROFILE_RECORD",
+        task_title: user.fullName,
+        course_name: null,
+        invited_email: cleanEmail,
+        token_hash: "profile",
+        status: "active",
+        expires_at: new Date(Date.now() + 365 * 86400000).toISOString(),
+        invited_by: user.id || cleanEmail,
+        inviter_name: user.fullName,
+        inviter_avatar: user.avatarUrl,
+        task_payload: {
+          ...user,
+          avatarUrl: user.avatarUrl,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+
+      // Update juga avatar di baris tugas yang pernah di-invite oleh user ini
+      await supabase
+        .from("collaboration_invitations")
+        .update({
+          inviter_name: user.fullName,
+          inviter_avatar: user.avatarUrl,
+        })
+        .eq("invited_by", user.id || cleanEmail);
+    } catch (e) {
+      console.warn("[SYNC_PROFILE] Gagal sync PROFILE_RECORD ke Supabase:", e);
+    }
+  }
+
+  // 2. Sinkronkan ke Server Database via API route
+  if (typeof window !== "undefined") {
+    try {
+      fetch("/api/db/students", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user }),
+      }).catch(() => {});
+    } catch {}
+  }
+}
+
 export async function updateUserProfile(updates: Partial<UserProfile>): Promise<UserProfile> {
   const current = getCurrentUser();
   if (!current) {
@@ -2349,69 +2437,22 @@ export async function updateUserProfile(updates: Partial<UserProfile>): Promise<
   };
   const cleanEmail = updated.email.toLowerCase().trim();
 
-  // 1. Sinkronkan ke Server DB via API route (await agar selesai sebelum fungsi kembali)
-  if (typeof window !== "undefined") {
-    try {
-      await fetch("/api/db/students", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user: updated }),
-      });
-    } catch (e) {
-      console.warn("Gagal simpan profil ke server DB:", e);
+  // 1. Perbarui sesi & akun lokal seketika
+  saveCurrentUser(updated);
+
+  const accounts = getRegisteredAccounts();
+  const nextAccounts = accounts.map((acc) => {
+    if (acc.user.id === updated.id || acc.user.email.toLowerCase() === cleanEmail) {
+      return {
+        ...acc,
+        user: updated,
+      };
     }
-  }
+    return acc;
+  });
+  saveRegisteredAccounts(nextAccounts);
 
-  // 2. Sinkronkan langsung ke Supabase Cloud (tabel profiles & auth metadata)
-  if (isSupabaseConfigured && supabase) {
-    try {
-      // Update langsung berdasarkan email di tabel profiles
-      const { error: profErr } = await supabase
-        .from("profiles")
-        .update({
-          full_name: updated.fullName,
-          nim: updated.nim,
-          major: updated.major,
-          semester: updated.semester,
-          campus: updated.campus,
-          avatar_url: updated.avatarUrl,
-        })
-        .eq("email", cleanEmail);
-
-      if (profErr) {
-        console.warn("[UPDATE_PROFILE] Supabase profile update error:", profErr);
-      }
-
-      // Update auth user metadata jika ada session aktif
-      try {
-        await supabase.auth.updateUser({
-          data: {
-            full_name: updated.fullName,
-            nim: updated.nim,
-            major: updated.major,
-            semester: updated.semester,
-            campus: updated.campus,
-            avatar_url: updated.avatarUrl,
-          },
-        });
-      } catch {}
-
-      // Sinkronisasi avatar & nama inviter di collaboration_invitations
-      try {
-        await supabase
-          .from("collaboration_invitations")
-          .update({
-            inviter_name: updated.fullName,
-            inviter_avatar: updated.avatarUrl,
-          })
-          .eq("invited_email", cleanEmail);
-      } catch {}
-    } catch (err) {
-      console.warn("Gagal update profil di Supabase:", err);
-    }
-  }
-
-  // 3. Perbarui avatar & nama di seluruh tugas lokal yang diikuti pengguna
+  // 2. Perbarui avatar & nama di seluruh tugas lokal yang diikuti pengguna
   const localTasks = getLocalTasks();
   let tasksChanged = false;
   for (const t of localTasks) {
@@ -2430,20 +2471,88 @@ export async function updateUserProfile(updates: Partial<UserProfile>): Promise<
     saveLocalTasks(localTasks);
   }
 
-  // 4. Perbarui sesi lokal
-  saveCurrentUser(updated);
+  // 3. Sinkronkan profil langsung ke Supabase Cloud (PROFILE_RECORD & Realtime broadcast)
+  if (isSupabaseConfigured && supabase) {
+    try {
+      // Upsert PROFILE_RECORD di collaboration_invitations (bebas RLS & memicu Realtime ke semua browser)
+      await supabase.from("collaboration_invitations").upsert({
+        id: `profile-record-${cleanEmail}`,
+        task_id: "PROFILE_RECORD",
+        task_title: updated.fullName,
+        course_name: null,
+        invited_email: cleanEmail,
+        token_hash: "profile",
+        status: "active",
+        expires_at: new Date(Date.now() + 365 * 86400000).toISOString(),
+        invited_by: updated.id || cleanEmail,
+        inviter_name: updated.fullName,
+        inviter_avatar: updated.avatarUrl,
+        task_payload: {
+          ...updated,
+          avatarUrl: updated.avatarUrl,
+          updatedAt: new Date().toISOString(),
+        },
+      });
 
-  const accounts = getRegisteredAccounts();
-  const nextAccounts = accounts.map((acc) => {
-    if (acc.user.id === updated.id || acc.user.email.toLowerCase() === cleanEmail) {
-      return {
-        ...acc,
-        user: updated,
-      };
+      // Update avatar inviter di seluruh undangan aktif yang dibuat pengguna
+      await supabase
+        .from("collaboration_invitations")
+        .update({
+          inviter_name: updated.fullName,
+          inviter_avatar: updated.avatarUrl,
+        })
+        .eq("invited_by", updated.id || cleanEmail);
+
+      // Coba update juga tabel profiles jika diizinkan RLS
+      try {
+        await supabase
+          .from("profiles")
+          .update({
+            full_name: updated.fullName,
+            nim: updated.nim,
+            major: updated.major,
+            semester: updated.semester,
+            campus: updated.campus,
+            avatar_url: updated.avatarUrl,
+          })
+          .eq("email", cleanEmail);
+      } catch {}
+
+      // Update auth user metadata jika ada session aktif
+      try {
+        await supabase.auth.updateUser({
+          data: {
+            full_name: updated.fullName,
+            nim: updated.nim,
+            major: updated.major,
+            semester: updated.semester,
+            campus: updated.campus,
+            avatar_url: updated.avatarUrl,
+          },
+        });
+      } catch {}
+    } catch (err) {
+      console.warn("Gagal update profil di Supabase:", err);
     }
-    return acc;
-  });
-  saveRegisteredAccounts(nextAccounts);
+  }
+
+  // 4. Sinkronkan ke Server DB via API route
+  if (typeof window !== "undefined") {
+    try {
+      await fetch("/api/db/students", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user: updated }),
+      });
+    } catch (e) {
+      console.warn("Gagal simpan profil ke server DB:", e);
+    }
+
+    // Trigger custom event agar komponen lokal seketika sinkron tanpa tunggu polling
+    try {
+      window.dispatchEvent(new CustomEvent("tugasku_profile_updated", { detail: updated }));
+    } catch {}
+  }
 
   return updated;
 }
