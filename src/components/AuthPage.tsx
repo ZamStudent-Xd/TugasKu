@@ -664,6 +664,8 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                               if (val.trim()) {
                                 setRegEmail(`${val.trim()}@bsi.ac.id`);
                                 clearFieldError("regEmail");
+                              } else {
+                                setRegEmail("");
                               }
                             }}
                             placeholder="12220888"
@@ -683,20 +685,18 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
 
                         <div>
                           <label className="block text-xs font-bold text-gray-700 mb-1">
-                            Email Student (@bsi.ac.id)
+                            Email Student
                           </label>
                           <input
                             type="email"
                             value={regEmail}
-                            onChange={(e) => {
-                              setRegEmail(e.target.value);
-                              clearFieldError("regEmail");
-                            }}
+                            readOnly
                             placeholder="nim@bsi.ac.id"
-                            className={`w-full px-3.5 py-2.5 rounded-2xl text-sm transition-all focus:outline-none ${
+                            title="Email student terisi otomatis sesuai NIM"
+                            className={`w-full px-3.5 py-2.5 rounded-2xl text-sm transition-all focus:outline-none cursor-not-allowed select-none ${
                               fieldErrors.regEmail
-                                ? "bg-pink-50/30 border-2 border-pink-500 focus:ring-2 focus:ring-pink-300"
-                                : "bg-[#F8F9FE] border border-[#E2E8F5] focus:ring-2 focus:ring-indigo-400"
+                                ? "bg-pink-50/50 border-2 border-pink-500 text-pink-700"
+                                : "bg-slate-100 border border-slate-200 text-slate-600"
                             }`}
                           />
                           {fieldErrors.regEmail && (
