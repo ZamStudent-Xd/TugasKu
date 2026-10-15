@@ -30,8 +30,8 @@ export function RightPanel({
     .sort((a, b) => new Date(a.deadline!).getTime() - new Date(b.deadline!).getTime())
     .slice(0, 3);
 
-  // Daftar tim kolaborasi aktif
-  const groupTasks = tasks.filter((t) => t.taskType === "group");
+  // Daftar tim kolaborasi aktif (belum selesai)
+  const groupTasks = tasks.filter((t) => t.taskType === "group" && getTaskStatus(t) !== "completed" && (t.progress ?? 0) < 100);
 
   return (
     <div className="w-full xl:w-80 flex flex-col gap-6 shrink-0">

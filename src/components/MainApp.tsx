@@ -631,9 +631,19 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
     return normalizedQuery ? done.filter(isTaskMatching) : done;
   }, [tasks, normalizedQuery, courses]);
 
-  // Calendar timeline tasks
+  // Calendar timeline tasks (Hanya menampilkan tugas aktif / belum selesai)
   const agendaTasks = useMemo(() => {
-    const valid = tasks.filter((t) => t && t.title && typeof t.title === "string" && t.title.trim() !== "" && !t.id?.startsWith("course-") && !t.id?.startsWith("profile-"));
+    const valid = tasks.filter(
+      (t) =>
+        t &&
+        t.title &&
+        typeof t.title === "string" &&
+        t.title.trim() !== "" &&
+        !t.id?.startsWith("course-") &&
+        !t.id?.startsWith("profile-") &&
+        getTaskStatus(t) !== "completed" &&
+        (t.progress ?? 0) < 100
+    );
     const activeTasks = normalizedQuery ? valid.filter(isTaskMatching) : valid;
     const withDeadline = activeTasks
       .filter((t) => t.deadline)
@@ -727,7 +737,9 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
       const updated = await updateTaskProgress(id, newProgress);
       setTasks(updated);
       if (newProgress === 100) {
-        addToast("success", "🎉 Selamat! Tugas berhasil diselesaikan 100%!");
+        addToast("success", "🎉 Selamat! Tugas berhasil diselesaikan 100% dan dipindahkan ke Riwayat Selesai!");
+      } else if (newProgress === 0) {
+        addToast("info", "Tugas dibuka kembali dan kembali ke jadwal deadline & tugas mata kuliah!");
       } else {
         addToast("info", `Progres diperbarui ke ${newProgress}%`);
       }
@@ -1404,8 +1416,9 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       {matchingCourses.map((course) => {
                         const linkedTasks = tasks.filter((t) => isTaskBelongsToCourse(t, course));
-                        const indivCount = linkedTasks.filter((t) => t.taskType === "individual").length;
-                        const groupCount = linkedTasks.filter((t) => t.taskType === "group").length;
+                        const activeTasks = linkedTasks.filter((t) => getTaskStatus(t) !== "completed" && (t.progress ?? 0) < 100);
+                        const indivCount = activeTasks.filter((t) => t.taskType === "individual").length;
+                        const groupCount = activeTasks.filter((t) => t.taskType === "group").length;
                         const stats = calculateCourseProgress(tasks, course);
 
                         return (
@@ -1468,7 +1481,7 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
                             {/* Task counts & CTA */}
                             <div className="pt-3 border-t border-gray-100 flex items-center justify-between text-xs">
                               <div className="flex items-center gap-2 text-gray-500 font-medium">
-                                <span>{linkedTasks.length} Tugas Total</span>
+                                <span>{activeTasks.length} Tugas Aktif</span>
                                 <span className="text-gray-300">•</span>
                                 <span className="text-sky-600 font-semibold">{indivCount} Individu</span>
                                 <span className="text-gray-300">•</span>
@@ -1503,7 +1516,18 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
                     );
                   }
 
-                  const courseTasks = tasks.filter((t) => t && t.title && typeof t.title === "string" && t.title.trim() !== "" && !t.id?.startsWith("course-") && !t.id?.startsWith("profile-") && isTaskBelongsToCourse(t, currentCourse));
+                  const courseTasks = tasks.filter(
+                    (t) =>
+                      t &&
+                      t.title &&
+                      typeof t.title === "string" &&
+                      t.title.trim() !== "" &&
+                      !t.id?.startsWith("course-") &&
+                      !t.id?.startsWith("profile-") &&
+                      isTaskBelongsToCourse(t, currentCourse) &&
+                      getTaskStatus(t) !== "completed" &&
+                      (t.progress ?? 0) < 100
+                  );
                   const indivTasks = courseTasks.filter((t) => t.taskType === "individual");
                   const groupTasksForCourse = courseTasks.filter((t) => t.taskType === "group");
                   const stats = calculateCourseProgress(tasks, currentCourse);
@@ -1536,7 +1560,7 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
                               </span>
                               <span className="text-gray-300">•</span>
                               <span className="text-xs font-semibold text-gray-400">
-                                {courseTasks.length} Total Tugas
+                                {courseTasks.length} Tugas Aktif
                               </span>
                             </div>
                             <h1 className="text-2xl font-black text-[#1E1B4B] mt-1">
@@ -1666,10 +1690,10 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
                             </>
                           ) : (
                             <>
-                              <Inbox className="w-10 h-10 text-gray-300 mx-auto mb-2" />
-                              <h3 className="text-sm font-bold text-[#1E1B4B]">Belum ada tugas pada kategori ini</h3>
+                              <CheckCircle2 className="w-10 h-10 text-emerald-500 mx-auto mb-2" />
+                              <h3 className="text-sm font-bold text-[#1E1B4B]">Tidak ada tugas aktif pada kategori ini</h3>
                               <p className="text-xs text-gray-400 mt-1 max-w-sm mx-auto">
-                                Buat tugas baru untuk mulai mengisi progres mata kuliah ini.
+                                Tugas yang telah selesai otomatis tersimpan di Riwayat Selesai.
                               </p>
                               <button
                                 onClick={() => {
@@ -1678,7 +1702,7 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
                                 }}
                                 className="mt-4 px-4 py-2 clay-button-primary text-xs font-bold"
                               >
-                                + Tambah Tugas Sekarang
+                                + Tambah Tugas Baru
                               </button>
                             </>
                           )}
@@ -1796,9 +1820,9 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
                           <span>{formatDeadline(task.deadline)}</span>
                           <div className="flex items-center gap-2">
                             <button
-                              onClick={() => handleUpdateProgress(task.id, 90)}
-                              className="text-xs font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
-                              title="Buka kembali tugas jika memerlukan revisi"
+                              onClick={() => handleUpdateProgress(task.id, 0)}
+                              className="text-xs font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-1 cursor-pointer"
+                              title="Buka kembali tugas agar terlihat kembali di jadwal deadline dan tugas mata kuliah"
                             >
                               <RotateCcw className="w-3.5 h-3.5" />
                               <span>Buka Kembali</span>
