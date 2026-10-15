@@ -59,6 +59,7 @@ import {
   declineTaskInvitation,
   sendTaskInvitation,
   getAllRegisteredStudents,
+  syncUserProfileToCloud,
 } from "@/lib/storage";
 import { isSupabaseConfigured, supabase } from "@/lib/supabaseClient";
 
@@ -296,6 +297,13 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
       client.removeChannel(channel);
     };
   }, [user?.email]);
+
+  // Pastikan profil & foto avatar pengguna aktif tersinkronisasi ke cloud (PROFILE_RECORD)
+  useEffect(() => {
+    if (user?.email) {
+      syncUserProfileToCloud(user);
+    }
+  }, [user?.email, user?.avatarUrl, user?.fullName]);
 
   const handleUpdateProfile = async (updated: UserProfile) => {
     const saved = await updateUserProfile(updated);

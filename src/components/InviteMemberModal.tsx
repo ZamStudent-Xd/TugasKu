@@ -56,45 +56,65 @@ export function InviteMemberModal({
     };
   }, [isOpen, task?.id, feedbackMsg]);
 
-  // Reset pencarian saat modal ditutup / dibuka
+  // Prefetch data mahasiswa seketika saat modal dibuka agar pencarian berlangsung instan (0 ms)
   useEffect(() => {
     if (!isOpen) {
       setSearchQuery("");
       setDebouncedQuery("");
-      setRegisteredStudents([]);
       setFeedbackMsg(null);
-    }
-  }, [isOpen]);
-
-  // Debounce input pencarian
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setDebouncedQuery(searchQuery);
-    }, 250);
-    return () => clearTimeout(timer);
-  }, [searchQuery]);
-
-  // Ambil daftar mahasiswa dari Server DB secara asinkron HANYA jika sudah mengetik minimal 1 huruf
-  useEffect(() => {
-    if (!isOpen) {
-      setRegisteredStudents([]);
       return;
     }
 
+    let isMounted = true;
+    fetchRegisteredStudents()
+      .then((students) => {
+        if (isMounted && students.length > 0) {
+          setRegisteredStudents(students);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isOpen]);
+
+  // Debounce input pencarian (150ms agar sangat responsif tanpa jeda lama)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedQuery(searchQuery);
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  // Refetch data terbaru jika ada kata kunci pencarian
+  useEffect(() => {
+    if (!isOpen) return;
+
     const clean = debouncedQuery.trim();
     if (clean.length === 0) {
-      setRegisteredStudents([]);
       setIsLoadingStudents(false);
       return;
     }
 
     let isMounted = true;
-    setIsLoadingStudents(true);
+    if (registeredStudents.length === 0) {
+      setIsLoadingStudents(true);
+    }
 
     fetchRegisteredStudents(clean)
-      .then((students) => {
-        if (isMounted) {
-          setRegisteredStudents(students);
+      .then((fresh) => {
+        if (isMounted && fresh.length > 0) {
+          setRegisteredStudents((prev) => {
+            const map = new Map<string, UserProfile>();
+            for (const s of prev) {
+              map.set(s.email.toLowerCase().trim(), s);
+            }
+            for (const s of fresh) {
+              map.set(s.email.toLowerCase().trim(), s);
+            }
+            return Array.from(map.values());
+          });
         }
       })
       .catch((err) => {
@@ -110,32 +130,77 @@ export function InviteMemberModal({
       isMounted = false;
     };
   }, [isOpen, debouncedQuery]);
- 
-  // Realtime subscription untuk mendeteksi pembaruan profil / avatar mahasiswa lain secara langsung
-  useEffect(() => {
-    if (!isOpen || !isSupabaseConfigured || !supabase) return;
 
-    const client = supabase;
-    const channel = client
-      .channel("invite-modal-profiles-sync")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "profiles" },
-        () => {
-          const clean = debouncedQuery.trim();
-          if (clean.length > 0) {
-            fetchRegisteredStudents(clean).then((fresh) => {
-              setRegisteredStudents(fresh);
+  // Realtime subscription untuk mendeteksi pembaruan profil & foto avatar mahasiswa lain secara seketika
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handleProfileUpdated = (e: Event) => {
+      const updated = (e as CustomEvent).detail as UserProfile;
+      if (updated && updated.email) {
+        const clean = updated.email.toLowerCase().trim();
+        setRegisteredStudents((prev) => {
+          const idx = prev.findIndex((s) => s.email.toLowerCase().trim() === clean);
+          if (idx >= 0) {
+            const copy = [...prev];
+            copy[idx] = { ...copy[idx], ...updated };
+            return copy;
+          }
+          return [...prev, updated];
+        });
+      }
+    };
+    window.addEventListener("tugasku_profile_updated", handleProfileUpdated);
+
+    let channel: any = null;
+    if (isSupabaseConfigured && supabase) {
+      channel = supabase
+        .channel(`invite-modal-sync-${Date.now()}`)
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "collaboration_invitations" },
+          (payload: any) => {
+            if (payload.new && payload.new.task_id === "PROFILE_RECORD") {
+              const p = payload.new.task_payload as UserProfile | undefined;
+              if (p && p.email) {
+                const clean = p.email.toLowerCase().trim();
+                setRegisteredStudents((prev) => {
+                  const idx = prev.findIndex((s) => s.email.toLowerCase().trim() === clean);
+                  const updatedStudent: UserProfile = {
+                    ...p,
+                    avatarUrl: payload.new.inviter_avatar || p.avatarUrl,
+                    fullName: payload.new.inviter_name || p.fullName,
+                  };
+                  if (idx >= 0) {
+                    const copy = [...prev];
+                    copy[idx] = { ...copy[idx], ...updatedStudent };
+                    return copy;
+                  }
+                  return [...prev, updatedStudent];
+                });
+              }
+            }
+          }
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "profiles" },
+          () => {
+            fetchRegisteredStudents().then((fresh) => {
+              if (fresh.length > 0) setRegisteredStudents(fresh);
             });
           }
-        }
-      )
-      .subscribe();
+        )
+        .subscribe();
+    }
 
     return () => {
-      client.removeChannel(channel);
+      window.removeEventListener("tugasku_profile_updated", handleProfileUpdated);
+      if (channel && supabase) {
+        supabase.removeChannel(channel);
+      }
     };
-  }, [isOpen, debouncedQuery]);
+  }, [isOpen]);
 
   // Filter mahasiswa: JANGAN TAMPILKAN PENGGUNA APAPUN SEBELUM MENGETIK MINIMAL 1 HURUF
   const filteredStudents = useMemo(() => {
