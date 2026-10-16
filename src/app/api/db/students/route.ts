@@ -6,11 +6,16 @@ import crypto from "crypto";
 
 function getSupabase() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   if (!url || !key || url.includes("your-project") || key.includes("your-anon-key")) {
     return null;
   }
-  return createClient(url, key);
+  return createClient(url, key, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+    },
+  });
 }
 
 const isValidUuid = (str: string) =>
@@ -150,27 +155,60 @@ export async function POST(request: NextRequest) {
       try {
         let authUserId = isValidUuid(user.id) ? user.id : null;
 
-        // Jika ada password, daftarkan ke auth.users
+        // Jika ada password, daftarkan atau perbarui di auth.users
         if (password) {
           try {
-            const { data: authData } = await supabase.auth.signUp({
-              email: cleanEmail,
-              password: password,
-              options: {
-                data: {
-                  full_name: user.fullName,
-                  nim: user.nim,
-                  major: user.major,
-                  semester: user.semester,
-                  campus: user.campus,
-                  avatar_url: user.avatarUrl,
+            if (supabase.auth.admin) {
+              const { data: usersData } = await supabase.auth.admin.listUsers();
+              const existing = usersData?.users?.find(
+                (u) => u.email?.toLowerCase().trim() === cleanEmail
+              );
+              if (existing) {
+                authUserId = existing.id;
+                user.id = authUserId;
+                await supabase.auth.admin.updateUserById(existing.id, {
+                  password,
+                  email_confirm: true,
+                });
+              } else {
+                const { data: created } = await supabase.auth.admin.createUser({
+                  email: cleanEmail,
+                  password,
+                  email_confirm: true,
+                  user_metadata: {
+                    full_name: user.fullName,
+                    nim: user.nim,
+                    major: user.major,
+                    semester: user.semester,
+                    campus: user.campus,
+                    avatar_url: user.avatarUrl,
+                  },
+                });
+                if (created?.user?.id) {
+                  authUserId = created.user.id;
+                  user.id = authUserId;
+                }
+              }
+            } else {
+              const { data: authData } = await supabase.auth.signUp({
+                email: cleanEmail,
+                password: password,
+                options: {
+                  data: {
+                    full_name: user.fullName,
+                    nim: user.nim,
+                    major: user.major,
+                    semester: user.semester,
+                    campus: user.campus,
+                    avatar_url: user.avatarUrl,
+                  },
                 },
-              },
-            });
+              });
 
-            if (authData?.user?.id) {
-              authUserId = authData.user.id;
-              user.id = authUserId;
+              if (authData?.user?.id) {
+                authUserId = authData.user.id;
+                user.id = authUserId;
+              }
             }
           } catch {
             // ignore

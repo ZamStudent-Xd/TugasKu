@@ -3608,39 +3608,23 @@ export async function completePasswordReset(
   }
   saveRegisteredAccounts(accs);
 
-  // 3. Daftarkan / perbarui password di Supabase Auth
-  if (isSupabaseConfigured && supabase) {
+  // 3. Daftarkan / perbarui password di Supabase Auth melalui Backend API Route
+  if (typeof window !== "undefined") {
     try {
-      const { data: authData, error: signUpErr } = await supabase.auth.signUp({
-        email: cleanEmail,
-        password: cleanPass,
-        options: {
-          data: {
-            full_name: userProfile.fullName,
-            nim: userProfile.nim,
-            major: userProfile.major,
-            semester: userProfile.semester,
-            campus: userProfile.campus,
-            avatar_url: userProfile.avatarUrl,
-          },
-        },
+      const resetRes = await fetch("/api/auth/reset-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: cleanEmail,
+          password: cleanPass,
+        }),
       });
-
-      if (!signUpErr && authData?.user?.id) {
-        userProfile.id = authData.user.id;
-      } else {
-        try {
-          const { data: signInData } = await supabase.auth.signInWithPassword({
-            email: cleanEmail,
-            password: cleanPass,
-          });
-          if (signInData?.user?.id) {
-            userProfile.id = signInData.user.id;
-          }
-        } catch {}
+      const resetJson = await resetRes.json().catch(() => ({}));
+      if (resetJson.success && resetJson.user) {
+        userProfile = { ...userProfile, ...resetJson.user };
       }
     } catch (e) {
-      console.warn("Supabase password update note:", e);
+      console.warn("Backend reset password API note:", e);
     }
   }
 
@@ -3670,7 +3654,7 @@ export async function completePasswordReset(
     } catch {}
   }
 
-  return { success: true, user: userProfile };
+  return { success: true, user: userProfile || undefined };
 }
 
 /**
