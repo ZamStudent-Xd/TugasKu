@@ -716,7 +716,7 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                           </>
                         ) : (
                           <>
-                            <span>Masuk ke TugasKu</span>
+                            <span>Masuk</span>
                             <ArrowRight className="w-4 h-4" />
                           </>
                         )}
