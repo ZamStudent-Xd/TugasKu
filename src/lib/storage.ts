@@ -2480,6 +2480,7 @@ interface PendingPasswordReset {
   email: string;
   studentName: string;
   createdAt: number;
+  isVerified?: boolean;
 }
 
 function getPendingPasswordResets(): Record<string, PendingPasswordReset> {
@@ -3456,13 +3457,13 @@ export async function requestPasswordReset(email: string): Promise<{
 }
 
 /**
- * Memverifikasi kode OTP 6 digit dan menyimpan kata sandi baru mahasiswa.
+ * Memverifikasi kode OTP 6 digit dari email untuk reset password.
+ * Hanya jika kode valid, status isVerified diubah menjadi true.
  */
-export async function verifyPasswordReset(
+export async function verifyResetOtpCode(
   email: string,
-  code: string,
-  newPassword: string
-): Promise<{ success: boolean; user?: UserProfile; error?: string }> {
+  code: string
+): Promise<{ success: boolean; error?: string }> {
   const emailCheck = validateStudentEmail(email);
   if (!emailCheck.isValid) {
     return { success: false, error: emailCheck.error };
@@ -3475,13 +3476,6 @@ export async function verifyPasswordReset(
   }
   const cleanCode = codeCheck.cleanCode;
 
-  const passCheck = validatePassword(newPassword);
-  if (!passCheck.isValid) {
-    return { success: false, error: passCheck.error };
-  }
-  const cleanPass = passCheck.cleanPassword!;
-
-  // 1. Verifikasi kode OTP
   const pending = getPendingPasswordResets();
   const item = pending[cleanEmail];
 
@@ -3509,7 +3503,54 @@ export async function verifyPasswordReset(
     };
   }
 
-  // 2. Ambil profil mahasiswa lengkap dari Supabase
+  // Tandai bahwa kode telah diverifikasi berhasil!
+  item.isVerified = true;
+  pending[cleanEmail] = item;
+  savePendingPasswordResets(pending);
+
+  return { success: true };
+}
+
+/**
+ * Menyimpan kata sandi baru setelah kode OTP terverifikasi berhasil.
+ */
+export async function completePasswordReset(
+  email: string,
+  newPassword: string
+): Promise<{ success: boolean; user?: UserProfile; error?: string }> {
+  const emailCheck = validateStudentEmail(email);
+  if (!emailCheck.isValid) {
+    return { success: false, error: emailCheck.error };
+  }
+  const cleanEmail = emailCheck.cleanEmail;
+
+  const passCheck = validatePassword(newPassword);
+  if (!passCheck.isValid) {
+    return { success: false, error: passCheck.error };
+  }
+  const cleanPass = passCheck.cleanPassword!;
+
+  const pending = getPendingPasswordResets();
+  const item = pending[cleanEmail];
+
+  if (!item || !item.isVerified) {
+    return {
+      success: false,
+      error: "Silakan verifikasi kode OTP dari email terlebih dahulu sebelum mengubah kata sandi.",
+    };
+  }
+
+  const isExpired = Date.now() - item.createdAt > 15 * 60 * 1000;
+  if (isExpired) {
+    delete pending[cleanEmail];
+    savePendingPasswordResets(pending);
+    return {
+      success: false,
+      error: "Sesi verifikasi telah kedaluwarsa. Silakan minta kode baru.",
+    };
+  }
+
+  // 1. Ambil profil mahasiswa lengkap dari Supabase
   let userProfile: UserProfile | null = null;
   if (isSupabaseConfigured && supabase) {
     try {
@@ -3557,7 +3598,7 @@ export async function verifyPasswordReset(
     };
   }
 
-  // 3. Simpan password baru ke local registered accounts
+  // 2. Simpan password baru ke local registered accounts
   const accs = getRegisteredAccounts();
   const idx = accs.findIndex((a) => a.user.email.toLowerCase() === cleanEmail);
   if (idx >= 0) {
@@ -3567,7 +3608,7 @@ export async function verifyPasswordReset(
   }
   saveRegisteredAccounts(accs);
 
-  // 4. Daftarkan / perbarui password di Supabase Auth
+  // 3. Daftarkan / perbarui password di Supabase Auth
   if (isSupabaseConfigured && supabase) {
     try {
       const { data: authData, error: signUpErr } = await supabase.auth.signUp({
@@ -3588,7 +3629,6 @@ export async function verifyPasswordReset(
       if (!signUpErr && authData?.user?.id) {
         userProfile.id = authData.user.id;
       } else {
-        // Jika user sudah ada di auth.users, sign in lalu update password
         try {
           const { data: signInData } = await supabase.auth.signInWithPassword({
             email: cleanEmail,
@@ -3604,7 +3644,7 @@ export async function verifyPasswordReset(
     }
   }
 
-  // 5. Simpan ke Server DB via API route
+  // 4. Simpan ke Server DB via API route
   if (typeof window !== "undefined") {
     try {
       await fetch("/api/db/students", {
@@ -3618,13 +3658,28 @@ export async function verifyPasswordReset(
     } catch {}
   }
 
-  // 6. Bersihkan pending verifikasi dan login-kan user
+  // 5. Bersihkan pending verifikasi dan login-kan user
   delete pending[cleanEmail];
   savePendingPasswordResets(pending);
 
   saveCurrentUser(userProfile);
 
   return { success: true, user: userProfile };
+}
+
+/**
+ * Kompatibilitas mundur: verifikasi kode sekaligus simpan password baru
+ */
+export async function verifyPasswordReset(
+  email: string,
+  code: string,
+  newPassword: string
+): Promise<{ success: boolean; user?: UserProfile; error?: string }> {
+  const otpRes = await verifyResetOtpCode(email, code);
+  if (!otpRes.success) {
+    return { success: false, error: otpRes.error };
+  }
+  return completePasswordReset(email, newPassword);
 }
 
 export async function logoutStudent(): Promise<void> {

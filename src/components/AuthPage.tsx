@@ -23,7 +23,8 @@ import {
   requestStudentRegistration, 
   verifyStudentRegistration,
   requestPasswordReset,
-  verifyPasswordReset
+  verifyResetOtpCode,
+  completePasswordReset
 } from "@/lib/storage";
 import { isSupabaseConfigured } from "@/lib/supabaseClient";
 import {
@@ -137,7 +138,7 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
   const [forgotConfirmPassword, setForgotConfirmPassword] = useState("");
   const [showForgotNewPassword, setShowForgotNewPassword] = useState(false);
   const [showForgotConfirmPassword, setShowForgotConfirmPassword] = useState(false);
-  const [isForgotVerifying, setIsForgotVerifying] = useState(false);
+  const [forgotStep, setForgotStep] = useState<"email" | "otp" | "new_password">("email");
   const [forgotError, setForgotError] = useState<string | null>(null);
   const [forgotSuccess, setForgotSuccess] = useState<string | null>(null);
 
@@ -149,11 +150,11 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
     setForgotConfirmPassword("");
     setForgotError(null);
     setForgotSuccess(null);
-    setIsForgotVerifying(false);
+    setForgotStep("email");
     setFieldErrors({});
   };
 
-  // Handle Submit Permintaan Reset Password (Kirim OTP)
+  // Step 1: Submit Email untuk minta kode OTP
   const handleRequestResetSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const emailCheck = validateStudentEmail(forgotEmail);
@@ -171,22 +172,43 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
         setForgotError(res.error || "Gagal mengirimkan kode verifikasi.");
         return;
       }
-      setIsForgotVerifying(true);
+      setForgotStep("otp");
       setForgotSuccess(`Kode verifikasi 6 digit telah dikirim ke ${emailCheck.cleanEmail}`);
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // Handle Submit Verifikasi OTP dan Simpan Kata Sandi Baru
-  const handleVerifyResetSubmit = async (e: React.FormEvent) => {
+  // Step 2: Submit Verifikasi Kode OTP (Membuka Form Kata Sandi Baru jika valid)
+  const handleVerifyOtpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const errors: Record<string, string> = {};
-
     const codeCheck = validateOtpCode(forgotCode);
     if (!codeCheck.isValid) {
-      errors.forgotCode = codeCheck.error || "Kode OTP 6 digit wajib diisi";
+      setFieldErrors({ forgotCode: codeCheck.error || "Kode OTP 6 digit wajib diisi" });
+      return;
     }
+
+    setIsSubmitting(true);
+    setForgotError(null);
+    setForgotSuccess(null);
+    try {
+      const res = await verifyResetOtpCode(forgotEmail, codeCheck.cleanCode);
+      if (!res.success) {
+        setForgotError(res.error || "Kode verifikasi 6 digit salah atau telah kedaluwarsa.");
+        return;
+      }
+      // KODE VALID! Buka form pengubahan kata sandi baru (Step 3)
+      setForgotStep("new_password");
+      setForgotSuccess("Kode OTP berhasil diverifikasi! Silakan tentukan kata sandi baru Anda.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Step 3: Submit Simpan Kata Sandi Baru
+  const handleCompleteResetSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const errors: Record<string, string> = {};
 
     const passCheck = validatePassword(forgotNewPassword);
     if (!passCheck.isValid) {
@@ -203,9 +225,9 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
     setIsSubmitting(true);
     setForgotError(null);
     try {
-      const res = await verifyPasswordReset(forgotEmail, forgotCode, forgotNewPassword);
+      const res = await completePasswordReset(forgotEmail, forgotNewPassword);
       if (!res.success || !res.user) {
-        setForgotError(res.error || "Gagal mengatur ulang kata sandi. Silakan periksa kembali kode OTP Anda.");
+        setForgotError(res.error || "Gagal menyimpan kata sandi baru. Silakan coba lagi.");
         return;
       }
       setTransitionType("login");
@@ -908,11 +930,11 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                     </form>
                   )}
 
-                  {/* TAB 3: FORM LUPA PASSWORD (RESET VIA EMAIL OTP) */}
+                  {/* TAB 3: FORM LUPA PASSWORD (3-STEP PROGRESSIVE DISCLOSURE) */}
                   {tab === "forgot" && (
                     <div>
-                      {!isForgotVerifying ? (
-                        /* STEP 1: INPUT EMAIL UNTUK MINTA KODE */
+                      {/* STEP 1: INPUT EMAIL MAHASISWA */}
+                      {forgotStep === "email" && (
                         <form onSubmit={handleRequestResetSubmit} className="space-y-4">
                           {forgotError && (
                             <div className="p-3 rounded-2xl bg-pink-50 border border-pink-200 text-xs font-semibold text-pink-700 flex items-center gap-2">
@@ -924,10 +946,10 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                           <div className="p-3.5 rounded-2xl bg-indigo-50/70 border border-indigo-100 text-xs text-indigo-900 leading-relaxed">
                             <p className="font-bold flex items-center gap-1.5 text-indigo-700 mb-1">
                               <KeyRound className="w-4 h-4" />
-                              <span>Pengaturan Ulang Kata Sandi</span>
+                              <span>Langkah 1: Masukkan Email Kampus</span>
                             </p>
                             <p className="text-[11px] text-indigo-700/80">
-                              Masukkan email student BSI Anda. Kami akan mengirimkan kode verifikasi 6 digit ke inbox email Anda untuk mengatur password baru.
+                              Masukkan email student BSI Anda. Kami akan mengirimkan kode verifikasi 6 digit ke inbox email Anda untuk mengonfirmasi kepemilikan akun.
                             </p>
                           </div>
 
@@ -994,9 +1016,11 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                             </button>
                           </div>
                         </form>
-                      ) : (
-                        /* STEP 2: INPUT OTP & KATA SANDI BARU */
-                        <form onSubmit={handleVerifyResetSubmit} className="space-y-4">
+                      )}
+
+                      {/* STEP 2: VERIFIKASI KODE OTP (HANYA KODE 6 DIGIT) */}
+                      {forgotStep === "otp" && (
+                        <form onSubmit={handleVerifyOtpSubmit} className="space-y-4">
                           {forgotError && (
                             <div className="p-3 rounded-2xl bg-pink-50 border border-pink-200 text-xs font-semibold text-pink-700 flex items-center gap-2">
                               <AlertCircle className="w-4 h-4 shrink-0" />
@@ -1011,9 +1035,19 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                             </div>
                           )}
 
+                          <div className="p-3.5 rounded-2xl bg-indigo-50/70 border border-indigo-100 text-xs text-indigo-900 leading-relaxed">
+                            <p className="font-bold flex items-center gap-1.5 text-indigo-700 mb-1">
+                              <KeyRound className="w-4 h-4" />
+                              <span>Langkah 2: Masukkan Kode OTP</span>
+                            </p>
+                            <p className="text-[11px] text-indigo-700/80">
+                              Buka inbox email student Anda di <span className="font-bold text-indigo-900">{forgotEmail}</span>, lalu masukkan 6 digit kode yang kami kirimkan.
+                            </p>
+                          </div>
+
                           <div>
                             <label className="block text-xs font-bold text-gray-700 mb-1.5 text-center">
-                              Masukkan Kode Verifikasi 6 Digit
+                              Kode Verifikasi 6 Digit
                             </label>
                             <input
                               type="text"
@@ -1024,7 +1058,7 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                                 clearFieldError("forgotCode");
                                 setForgotError(null);
                               }}
-                              placeholder="Contoh: 123456"
+                              placeholder="123456"
                               className="w-full text-center text-2xl font-bold tracking-widest py-3 bg-[#F8F9FE] border-2 border-indigo-200 rounded-2xl focus:outline-none focus:border-indigo-600 focus:ring-2 focus:ring-indigo-300 font-mono"
                               autoFocus
                             />
@@ -1034,6 +1068,69 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                                 {fieldErrors.forgotCode}
                               </p>
                             )}
+                          </div>
+
+                          <button
+                            type="submit"
+                            disabled={isSubmitting}
+                            className="w-full py-3 clay-button-primary text-xs font-bold shadow-lg shadow-indigo-500/25 flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+                          >
+                            {isSubmitting ? (
+                              <>
+                                <RefreshCw className="w-4 h-4 animate-spin" />
+                                <span>Memverifikasi Kode...</span>
+                              </>
+                            ) : (
+                              <>
+                                <span>Verifikasi Kode OTP</span>
+                                <ArrowRight className="w-4 h-4" />
+                              </>
+                            )}
+                          </button>
+
+                          <div className="flex items-center justify-between pt-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setForgotStep("email");
+                                setForgotError(null);
+                              }}
+                              className="inline-flex items-center gap-1 text-xs font-semibold text-gray-500 hover:text-gray-800"
+                            >
+                              <ArrowLeft className="w-3.5 h-3.5" />
+                              <span>Ganti Email</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={handleResendResetCode}
+                              className="inline-flex items-center gap-1 text-xs font-bold text-indigo-600 hover:text-indigo-800"
+                            >
+                              <RefreshCw className="w-3.5 h-3.5" />
+                              <span>Kirim Ulang Kode</span>
+                            </button>
+                          </div>
+                        </form>
+                      )}
+
+                      {/* STEP 3: HANYA TAMPIL SETELAH KODE TERVERIFIKASI BENAR */}
+                      {forgotStep === "new_password" && (
+                        <form onSubmit={handleCompleteResetSubmit} className="space-y-4">
+                          {forgotError && (
+                            <div className="p-3 rounded-2xl bg-pink-50 border border-pink-200 text-xs font-semibold text-pink-700 flex items-center gap-2">
+                              <AlertCircle className="w-4 h-4 shrink-0" />
+                              <span>{forgotError}</span>
+                            </div>
+                          )}
+
+                          <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 leading-relaxed">
+                            <p className="font-bold flex items-center gap-1.5 text-emerald-700 mb-1">
+                              <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                              <span>Langkah 3: Tentukan Kata Sandi Baru</span>
+                            </p>
+                            <p className="text-[11px] text-emerald-700">
+                              Kode OTP berhasil diverifikasi untuk <span className="font-bold">{forgotEmail}</span>. Silakan masukkan kata sandi baru Anda di bawah ini:
+                            </p>
                           </div>
 
                           <div>
@@ -1056,6 +1153,7 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                                     ? "bg-pink-50/30 border-2 border-pink-500 focus:ring-2 focus:ring-pink-300"
                                     : "bg-[#F8F9FE] border border-[#E2E8F5] focus:ring-2 focus:ring-indigo-400"
                                 }`}
+                                autoFocus
                               />
                               <button
                                 type="button"
@@ -1123,31 +1221,22 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                             ) : (
                               <>
                                 <CheckCircle2 className="w-4 h-4" />
-                                <span>Simpan Kata Sandi & Masuk</span>
+                                <span>Simpan Kata Sandi & Masuk ke TugasKu</span>
                               </>
                             )}
                           </button>
 
-                          <div className="flex items-center justify-between pt-2">
+                          <div className="pt-2 text-center">
                             <button
                               type="button"
                               onClick={() => {
-                                setIsForgotVerifying(false);
-                                setForgotError(null);
+                                setTab("login");
+                                handleResetForgotForm();
                               }}
-                              className="inline-flex items-center gap-1 text-xs font-semibold text-gray-500 hover:text-gray-800"
+                              className="inline-flex items-center gap-1.5 text-xs font-bold text-gray-500 hover:text-indigo-600 transition-colors"
                             >
                               <ArrowLeft className="w-3.5 h-3.5" />
-                              <span>Ganti Email</span>
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={handleResendResetCode}
-                              className="inline-flex items-center gap-1 text-xs font-bold text-indigo-600 hover:text-indigo-800"
-                            >
-                              <RefreshCw className="w-3.5 h-3.5" />
-                              <span>Kirim Ulang Kode</span>
+                              <span>Batal &amp; Kembali ke Halaman Masuk</span>
                             </button>
                           </div>
                         </form>
