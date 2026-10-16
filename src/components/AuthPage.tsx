@@ -556,7 +556,7 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                   <div className="text-center mb-6">
                     <h2 className="text-xl font-black text-[#1E1B4B]">
                       {tab === "login"
-                        ? "Masuk ke TugasKu"
+                        ? "Masuk"
                         : tab === "register"
                         ? "Daftar Akun Mahasiswa"
                         : "Atur Ulang Kata Sandi"}
