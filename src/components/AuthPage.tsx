@@ -115,10 +115,13 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
   };
 
   // Reset isian field form Login
+  const [loginSuccessNotice, setLoginSuccessNotice] = useState<string | null>(null);
+
   const handleResetLoginForm = () => {
     setLoginEmail("");
     setLoginPassword("");
     setLoginError(null);
+    setLoginSuccessNotice(null);
     setFieldErrors({});
   };
 
@@ -226,12 +229,21 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
     setForgotError(null);
     try {
       const res = await completePasswordReset(forgotEmail, forgotNewPassword);
-      if (!res.success || !res.user) {
+      if (!res.success) {
         setForgotError(res.error || "Gagal menyimpan kata sandi baru. Silakan coba lagi.");
         return;
       }
-      setTransitionType("login");
-      setTransitioningUser(res.user);
+      // Keamanan Sistem: Jangan langsung auto-login, kembalikan ke halaman login untuk masuk manual
+      const savedEmail = forgotEmail;
+      handleResetForgotForm();
+      setLoginEmail(savedEmail);
+      setLoginPassword("");
+      setLoginError(null);
+      setLoginSuccessNotice("Kata sandi berhasil diperbarui! Demi keamanan akun, silakan masuk menggunakan kata sandi baru Anda.");
+      setTab("login");
+      if (typeof window !== "undefined") {
+        window.history.pushState(null, "", "/login");
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -274,6 +286,7 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
   // Handle Login Submit dengan Zero-Trust Validation & Pemeriksaan Perangkat
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setLoginSuccessNotice(null);
 
     // Verifikasi Kelayakan Perangkat (Laptop atau Tablet min. 8.7 Inci)
     const deviceCheck = checkDeviceSupport();
@@ -619,6 +632,7 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                         setTab("register");
                         setFieldErrors({});
                         setLoginError(null);
+                        setLoginSuccessNotice(null);
                         if (typeof window !== "undefined") {
                           window.history.pushState(null, "", "/register");
                         }
@@ -637,6 +651,13 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                   {/* TAB 1: FORM LOGIN */}
                   {tab === "login" && (
                     <form onSubmit={handleLoginSubmit} className="space-y-4">
+                      {loginSuccessNotice && (
+                        <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 text-xs font-semibold text-emerald-800 flex items-start gap-2 animate-fade-in">
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                          <span>{loginSuccessNotice}</span>
+                        </div>
+                      )}
+
                       {loginError && (
                         <div className="p-3 rounded-2xl bg-pink-50 border border-pink-200 text-xs font-semibold text-pink-700 flex items-center gap-2">
                           <AlertCircle className="w-4 h-4 shrink-0" />
@@ -716,6 +737,7 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                               setTab("forgot");
                               setFieldErrors({});
                               setLoginError(null);
+                              setLoginSuccessNotice(null);
                               setForgotError(null);
                               if (loginEmail) setForgotEmail(loginEmail);
                             }}
@@ -1221,7 +1243,7 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                             ) : (
                               <>
                                 <CheckCircle2 className="w-4 h-4" />
-                                <span>Simpan Kata Sandi & Masuk ke TugasKu</span>
+                                <span>Simpan Kata Sandi Baru</span>
                               </>
                             )}
                           </button>

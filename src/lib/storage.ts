@@ -3658,11 +3658,17 @@ export async function completePasswordReset(
     } catch {}
   }
 
-  // 5. Bersihkan pending verifikasi dan login-kan user
+  // 5. Bersihkan pending verifikasi
   delete pending[cleanEmail];
   savePendingPasswordResets(pending);
 
-  saveCurrentUser(userProfile);
+  // Demi keamanan data & sistem: JANGAN buat sesi login aktif otomatis.
+  // Pastikan sesi auth Supabase di-sign out jika sempat aktif selama proses update.
+  if (isSupabaseConfigured && supabase) {
+    try {
+      await supabase.auth.signOut();
+    } catch {}
+  }
 
   return { success: true, user: userProfile };
 }
