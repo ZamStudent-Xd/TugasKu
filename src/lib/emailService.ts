@@ -24,7 +24,8 @@ export const isGmailConfigured = isEmailConfigured;
 export async function sendOtpEmail(
   toEmail: string,
   otpCode: string,
-  studentName: string
+  studentName: string,
+  purpose: "register" | "reset" = "register"
 ): Promise<{ success: boolean; error?: string }> {
   const apiKey = process.env.BREVO_API_KEY || "";
   const senderEmail = process.env.BREVO_SENDER_EMAIL || "";
@@ -36,6 +37,11 @@ export async function sendOtpEmail(
       error: "Brevo belum dikonfigurasi. Atur BREVO_API_KEY dan BREVO_SENDER_EMAIL di .env.local",
     };
   }
+
+  const isReset = purpose === "reset";
+  const actionText = isReset
+    ? "Anda meminta pengaturan ulang kata sandi di TugasKu. Gunakan kode verifikasi di bawah ini untuk membuat kata sandi baru Anda:"
+    : "Anda telah mendaftarkan akun baru di TugasKu. Gunakan kode verifikasi di bawah ini untuk menyelesaikan pendaftaran Anda:";
 
   const htmlContent = `
 <!DOCTYPE html>
@@ -62,7 +68,7 @@ export async function sendOtpEmail(
         Halo, <span style="color: #1E1B4B;">${studentName}</span> &#128075;
       </p>
       <p style="margin: 0 0 24px; font-size: 13px; color: #6B7280; line-height: 1.6;">
-        Anda telah mendaftarkan akun baru di TugasKu. Gunakan kode verifikasi di bawah ini untuk menyelesaikan pendaftaran Anda:
+        ${actionText}
       </p>
 
       <!-- OTP Code Box -->
@@ -115,9 +121,13 @@ export async function sendOtpEmail(
             name: studentName,
           },
         ],
-        subject: `Kode Verifikasi TugasKu Anda: ${otpCode}`,
+        subject: isReset
+          ? `[TugasKu] Kode Pengaturan Ulang Password: ${otpCode}`
+          : `Kode Verifikasi TugasKu Anda: ${otpCode}`,
         htmlContent,
-        textContent: `Kode Verifikasi TugasKu Anda: ${otpCode}\n\nHalo ${studentName},\nGunakan kode 6 digit ini untuk menyelesaikan pendaftaran akun TugasKu Anda.\n\nKode berlaku selama 10 menit. Jangan bagikan kode ini kepada siapa pun.\n\n© 2026 TugasKu — Universitas BSI`,
+        textContent: isReset
+          ? `[TugasKu] Kode Pengaturan Ulang Password: ${otpCode}\n\nHalo ${studentName},\nGunakan kode 6 digit ini untuk mengatur ulang kata sandi akun TugasKu Anda.\n\nKode berlaku selama 10 menit. Jangan bagikan kode ini kepada siapa pun.\n\n© 2026 TugasKu — Universitas BSI`
+          : `Kode Verifikasi TugasKu Anda: ${otpCode}\n\nHalo ${studentName},\nGunakan kode 6 digit ini untuk menyelesaikan pendaftaran akun TugasKu Anda.\n\nKode berlaku selama 10 menit. Jangan bagikan kode ini kepada siapa pun.\n\n© 2026 TugasKu — Universitas BSI`,
       }),
     });
 

@@ -31,7 +31,7 @@ export async function POST(request: NextRequest) {
 
     // 2. Parse request body
     const body = await request.json();
-    const { email, otpCode, studentName } = body;
+    const { email, otpCode, studentName, purpose } = body;
 
     // 3. Zero-Trust Validation
     const emailCheck = validateStudentEmail(email);
@@ -52,8 +52,13 @@ export async function POST(request: NextRequest) {
 
     const cleanName = sanitizeText(studentName) || "Mahasiswa BSI";
 
-    // 4. Kirim email OTP melalui Gmail SMTP
-    const result = await sendOtpEmail(emailCheck.cleanEmail, codeCheck.cleanCode, cleanName);
+    // 4. Kirim email OTP melalui Brevo API
+    const result = await sendOtpEmail(
+      emailCheck.cleanEmail,
+      codeCheck.cleanCode,
+      cleanName,
+      purpose === "reset" ? "reset" : "register"
+    );
 
     if (!result.success) {
       return NextResponse.json(

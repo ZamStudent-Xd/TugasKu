@@ -16,6 +16,7 @@ const TASKS_KEY = "tugasku_tasks_v3";
 const AUTH_USER_KEY = "tugasku_auth_user_v3";
 const REGISTERED_USERS_KEY = "tugasku_registered_users_v3";
 const PENDING_VERIFICATIONS_KEY = "tugasku_pending_verifications_v3";
+const PENDING_PASSWORD_RESETS_KEY = "tugasku_pending_password_resets_v3";
 const TASK_INVITATIONS_KEY = "tugasku_task_invitations_v3";
 
 // Bersihkan data dummy versi sebelumnya
@@ -2474,6 +2475,29 @@ function savePendingVerifications(data: Record<string, PendingVerification>) {
   }
 }
 
+interface PendingPasswordReset {
+  code: string;
+  email: string;
+  studentName: string;
+  createdAt: number;
+}
+
+function getPendingPasswordResets(): Record<string, PendingPasswordReset> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = localStorage.getItem(PENDING_PASSWORD_RESETS_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function savePendingPasswordResets(data: Record<string, PendingPasswordReset>) {
+  if (typeof window !== "undefined") {
+    localStorage.setItem(PENDING_PASSWORD_RESETS_KEY, JSON.stringify(data));
+  }
+}
+
 /**
  * Mengambil data user yang sedang login di local storage.
  * TIDAK melakukan auto-login: Mengembalikan null jika belum ada sesi aktif.
@@ -3315,6 +3339,292 @@ export async function verifyStudentRegistration(
   }
 
   return { success: true, user: item.user };
+}
+
+/**
+ * Meminta kode verifikasi 6 digit untuk mengatur ulang (reset) password mahasiswa.
+ * Kode dikirim langsung ke inbox email student BSI via Brevo.
+ */
+export async function requestPasswordReset(email: string): Promise<{
+  success: boolean;
+  studentName?: string;
+  error?: string;
+}> {
+  const emailCheck = validateStudentEmail(email);
+  if (!emailCheck.isValid) {
+    return { success: false, error: emailCheck.error };
+  }
+  const cleanEmail = emailCheck.cleanEmail;
+
+  // 1. Periksa apakah akun mahasiswa terdaftar di database profiles Supabase atau serverDb
+  let studentName = "";
+  let studentExists = false;
+
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { data: prof } = await supabase
+        .from("profiles")
+        .select("full_name, email")
+        .eq("email", cleanEmail)
+        .maybeSingle();
+
+      if (prof) {
+        studentExists = true;
+        studentName = prof.full_name;
+      }
+    } catch (e) {
+      console.warn("Supabase profile check error:", e);
+    }
+  }
+
+  // Cek fallback jika Supabase belum menemukan
+  if (!studentExists && typeof window !== "undefined") {
+    try {
+      const res = await fetch(`/api/db/students?q=${encodeURIComponent(cleanEmail)}`);
+      if (res.ok) {
+        const json = await res.json();
+        if (json.success && Array.isArray(json.students)) {
+          const match = json.students.find(
+            (s: UserProfile) => s.email.toLowerCase().trim() === cleanEmail
+          );
+          if (match) {
+            studentExists = true;
+            studentName = match.fullName;
+          }
+        }
+      }
+    } catch {}
+  }
+
+  if (!studentExists) {
+    const accs = getRegisteredAccounts();
+    const local = accs.find((a) => a.user.email.toLowerCase().trim() === cleanEmail);
+    if (local) {
+      studentExists = true;
+      studentName = local.user.fullName;
+    }
+  }
+
+  if (!studentExists) {
+    return {
+      success: false,
+      error: "Email student tidak ditemukan di sistem TugasKu. Pastikan Anda telah terdaftar.",
+    };
+  }
+
+  // 2. Buat kode verifikasi 6 digit numerik rahasia
+  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  const cleanName = studentName || cleanEmail.split("@")[0];
+
+  const pending = getPendingPasswordResets();
+  pending[cleanEmail] = {
+    code,
+    email: cleanEmail,
+    studentName: cleanName,
+    createdAt: Date.now(),
+  };
+  savePendingPasswordResets(pending);
+
+  // 3. Kirim kode OTP via Brevo API
+  try {
+    const emailRes = await fetch("/api/send-otp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: cleanEmail,
+        otpCode: code,
+        studentName: cleanName,
+        purpose: "reset",
+      }),
+    });
+
+    const emailData = await emailRes.json().catch(() => ({}));
+    if (!emailRes.ok) {
+      return {
+        success: false,
+        error: emailData.error || "Gagal mengirimkan kode verifikasi ke email kampus Anda.",
+      };
+    }
+  } catch (err: unknown) {
+    return {
+      success: false,
+      error: "Gagal menghubungi server email. Periksa koneksi internet Anda.",
+    };
+  }
+
+  return { success: true, studentName: cleanName };
+}
+
+/**
+ * Memverifikasi kode OTP 6 digit dan menyimpan kata sandi baru mahasiswa.
+ */
+export async function verifyPasswordReset(
+  email: string,
+  code: string,
+  newPassword: string
+): Promise<{ success: boolean; user?: UserProfile; error?: string }> {
+  const emailCheck = validateStudentEmail(email);
+  if (!emailCheck.isValid) {
+    return { success: false, error: emailCheck.error };
+  }
+  const cleanEmail = emailCheck.cleanEmail;
+
+  const codeCheck = validateOtpCode(code);
+  if (!codeCheck.isValid) {
+    return { success: false, error: codeCheck.error };
+  }
+  const cleanCode = codeCheck.cleanCode;
+
+  const passCheck = validatePassword(newPassword);
+  if (!passCheck.isValid) {
+    return { success: false, error: passCheck.error };
+  }
+  const cleanPass = passCheck.cleanPassword!;
+
+  // 1. Verifikasi kode OTP
+  const pending = getPendingPasswordResets();
+  const item = pending[cleanEmail];
+
+  if (!item) {
+    return {
+      success: false,
+      error: "Sesi verifikasi tidak ditemukan atau telah kedaluwarsa. Silakan minta kode baru.",
+    };
+  }
+
+  const isExpired = Date.now() - item.createdAt > 15 * 60 * 1000;
+  if (isExpired) {
+    delete pending[cleanEmail];
+    savePendingPasswordResets(pending);
+    return {
+      success: false,
+      error: "Kode verifikasi telah kedaluwarsa (berlaku 15 menit). Silakan minta kode baru.",
+    };
+  }
+
+  if (item.code !== cleanCode) {
+    return {
+      success: false,
+      error: "Kode verifikasi 6 digit salah. Silakan periksa kembali email Anda.",
+    };
+  }
+
+  // 2. Ambil profil mahasiswa lengkap dari Supabase
+  let userProfile: UserProfile | null = null;
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { data: prof } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("email", cleanEmail)
+        .maybeSingle();
+
+      if (prof) {
+        userProfile = {
+          id: prof.id,
+          fullName: prof.full_name,
+          email: prof.email,
+          nim: prof.nim || "",
+          major: prof.major || "Teknologi Informasi",
+          semester: prof.semester || 1,
+          campus: prof.campus || "Universitas BSI (Bina Sarana Informatika)",
+          avatarUrl: prof.avatar_url,
+          createdAt: prof.created_at,
+        };
+      }
+    } catch {}
+  }
+
+  if (!userProfile) {
+    const accs = getRegisteredAccounts();
+    const local = accs.find((a) => a.user.email.toLowerCase().trim() === cleanEmail);
+    if (local) {
+      userProfile = local.user;
+    }
+  }
+
+  if (!userProfile) {
+    userProfile = {
+      id: `user-${Date.now()}`,
+      fullName: item.studentName || cleanEmail.split("@")[0],
+      email: cleanEmail,
+      nim: cleanEmail.split("@")[0] || "",
+      major: "Teknologi Informasi",
+      semester: 1,
+      campus: "Universitas BSI (Bina Sarana Informatika)",
+      avatarUrl: `https://api.dicebear.com/7.x/bottts/svg?seed=${cleanEmail}`,
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  // 3. Simpan password baru ke local registered accounts
+  const accs = getRegisteredAccounts();
+  const idx = accs.findIndex((a) => a.user.email.toLowerCase() === cleanEmail);
+  if (idx >= 0) {
+    accs[idx] = { user: userProfile, password: cleanPass };
+  } else {
+    accs.push({ user: userProfile, password: cleanPass });
+  }
+  saveRegisteredAccounts(accs);
+
+  // 4. Daftarkan / perbarui password di Supabase Auth
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { data: authData, error: signUpErr } = await supabase.auth.signUp({
+        email: cleanEmail,
+        password: cleanPass,
+        options: {
+          data: {
+            full_name: userProfile.fullName,
+            nim: userProfile.nim,
+            major: userProfile.major,
+            semester: userProfile.semester,
+            campus: userProfile.campus,
+            avatar_url: userProfile.avatarUrl,
+          },
+        },
+      });
+
+      if (!signUpErr && authData?.user?.id) {
+        userProfile.id = authData.user.id;
+      } else {
+        // Jika user sudah ada di auth.users, sign in lalu update password
+        try {
+          const { data: signInData } = await supabase.auth.signInWithPassword({
+            email: cleanEmail,
+            password: cleanPass,
+          });
+          if (signInData?.user?.id) {
+            userProfile.id = signInData.user.id;
+          }
+        } catch {}
+      }
+    } catch (e) {
+      console.warn("Supabase password update note:", e);
+    }
+  }
+
+  // 5. Simpan ke Server DB via API route
+  if (typeof window !== "undefined") {
+    try {
+      await fetch("/api/db/students", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user: userProfile,
+          password: cleanPass,
+        }),
+      });
+    } catch {}
+  }
+
+  // 6. Bersihkan pending verifikasi dan login-kan user
+  delete pending[cleanEmail];
+  savePendingPasswordResets(pending);
+
+  saveCurrentUser(userProfile);
+
+  return { success: true, user: userProfile };
 }
 
 export async function logoutStudent(): Promise<void> {

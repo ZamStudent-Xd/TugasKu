@@ -21,7 +21,9 @@ import { UserProfile } from "@/types";
 import { 
   loginStudent, 
   requestStudentRegistration, 
-  verifyStudentRegistration
+  verifyStudentRegistration,
+  requestPasswordReset,
+  verifyPasswordReset
 } from "@/lib/storage";
 import { isSupabaseConfigured } from "@/lib/supabaseClient";
 import {
@@ -35,12 +37,12 @@ import { checkDeviceSupport } from "@/lib/deviceDetection";
 import { DashboardLoadingTransition } from "@/components/DashboardLoadingTransition";
 
 interface AuthPageProps {
-  initialTab?: "login" | "register";
+  initialTab?: "login" | "register" | "forgot";
   onSuccess: (user: UserProfile) => void;
 }
 
 export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
-  const [tab, setTab] = useState<"login" | "register">(initialTab);
+  const [tab, setTab] = useState<"login" | "register" | "forgot">(initialTab);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -126,6 +128,108 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
     setRegEmail("");
     setRegPassword("");
     setFieldErrors({});
+  };
+
+  // Lupa Password State
+  const [forgotEmail, setForgotEmail] = useState("");
+  const [forgotCode, setForgotCode] = useState("");
+  const [forgotNewPassword, setForgotNewPassword] = useState("");
+  const [forgotConfirmPassword, setForgotConfirmPassword] = useState("");
+  const [showForgotNewPassword, setShowForgotNewPassword] = useState(false);
+  const [showForgotConfirmPassword, setShowForgotConfirmPassword] = useState(false);
+  const [isForgotVerifying, setIsForgotVerifying] = useState(false);
+  const [forgotError, setForgotError] = useState<string | null>(null);
+  const [forgotSuccess, setForgotSuccess] = useState<string | null>(null);
+
+  // Reset isian field form Lupa Password
+  const handleResetForgotForm = () => {
+    setForgotEmail("");
+    setForgotCode("");
+    setForgotNewPassword("");
+    setForgotConfirmPassword("");
+    setForgotError(null);
+    setForgotSuccess(null);
+    setIsForgotVerifying(false);
+    setFieldErrors({});
+  };
+
+  // Handle Submit Permintaan Reset Password (Kirim OTP)
+  const handleRequestResetSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const emailCheck = validateStudentEmail(forgotEmail);
+    if (!emailCheck.isValid) {
+      setFieldErrors({ forgotEmail: emailCheck.error || "Email student tidak valid" });
+      return;
+    }
+
+    setIsSubmitting(true);
+    setForgotError(null);
+    setForgotSuccess(null);
+    try {
+      const res = await requestPasswordReset(emailCheck.cleanEmail);
+      if (!res.success) {
+        setForgotError(res.error || "Gagal mengirimkan kode verifikasi.");
+        return;
+      }
+      setIsForgotVerifying(true);
+      setForgotSuccess(`Kode verifikasi 6 digit telah dikirim ke ${emailCheck.cleanEmail}`);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Handle Submit Verifikasi OTP dan Simpan Kata Sandi Baru
+  const handleVerifyResetSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const errors: Record<string, string> = {};
+
+    const codeCheck = validateOtpCode(forgotCode);
+    if (!codeCheck.isValid) {
+      errors.forgotCode = codeCheck.error || "Kode OTP 6 digit wajib diisi";
+    }
+
+    const passCheck = validatePassword(forgotNewPassword);
+    if (!passCheck.isValid) {
+      errors.forgotNewPassword = passCheck.error || "Password baru tidak valid (min. 6 karakter)";
+    } else if (forgotNewPassword !== forgotConfirmPassword) {
+      errors.forgotConfirmPassword = "Konfirmasi kata sandi tidak cocok";
+    }
+
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      return;
+    }
+
+    setIsSubmitting(true);
+    setForgotError(null);
+    try {
+      const res = await verifyPasswordReset(forgotEmail, forgotCode, forgotNewPassword);
+      if (!res.success || !res.user) {
+        setForgotError(res.error || "Gagal mengatur ulang kata sandi. Silakan periksa kembali kode OTP Anda.");
+        return;
+      }
+      setTransitionType("login");
+      setTransitioningUser(res.user);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Handle Kirim Ulang Kode Reset
+  const handleResendResetCode = async () => {
+    if (!forgotEmail) return;
+    setIsSubmitting(true);
+    setForgotError(null);
+    try {
+      const res = await requestPasswordReset(forgotEmail);
+      if (res.success) {
+        setForgotSuccess("Kode verifikasi baru berhasil dikirim!");
+      } else {
+        setForgotError(res.error || "Gagal mengirim ulang kode.");
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   // Demo Login Handler
@@ -451,17 +555,24 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                 <>
                   <div className="text-center mb-6">
                     <h2 className="text-xl font-black text-[#1E1B4B]">
-                      {tab === "login" ? "Masuk ke TugasKu" : "Daftar Akun Mahasiswa"}
+                      {tab === "login"
+                        ? "Masuk ke TugasKu"
+                        : tab === "register"
+                        ? "Daftar Akun Mahasiswa"
+                        : "Atur Ulang Kata Sandi"}
                     </h2>
                     <p className="text-xs text-gray-500 mt-1">
                       {tab === "login"
                         ? "Masukkan email student BSI dan password Anda"
-                        : "Gunakan email student resmi nim@bsi.ac.id"}
+                        : tab === "register"
+                        ? "Gunakan email student resmi nim@bsi.ac.id"
+                        : "Verifikasi email kampus untuk membuat password baru"}
                     </p>
                   </div>
 
-                  {/* Toggle Tab Masuk / Daftar */}
-                  <div className="grid grid-cols-2 p-1.5 bg-[#F1F3F9] rounded-2xl mb-6">
+                  {/* Toggle Tab Masuk / Daftar (Hanya tampil di tab login & register) */}
+                  {tab !== "forgot" && (
+                    <div className="grid grid-cols-2 p-1.5 bg-[#F1F3F9] rounded-2xl mb-6">
                     <button
                       type="button"
                       onClick={() => {
@@ -499,6 +610,7 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                       Daftar Akun Baru
                     </button>
                   </div>
+                  )}
 
                   {/* TAB 1: FORM LOGIN */}
                   {tab === "login" && (
@@ -540,9 +652,24 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                       </div>
 
                       <div>
-                        <label className="block text-xs font-bold text-gray-700 mb-1.5">
-                          Password
-                        </label>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <label className="block text-xs font-bold text-gray-700">
+                            Password
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTab("forgot");
+                              setFieldErrors({});
+                              setLoginError(null);
+                              setForgotError(null);
+                              if (loginEmail) setForgotEmail(loginEmail);
+                            }}
+                            className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800 transition-colors"
+                          >
+                            Lupa Password?
+                          </button>
+                        </div>
                         <div className="relative">
                           <Lock className="w-4 h-4 text-gray-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
                           <input
@@ -777,6 +904,253 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                         </button>
                       </div>
                     </form>
+                  )}
+
+                  {/* TAB 3: FORM LUPA PASSWORD (RESET VIA EMAIL OTP) */}
+                  {tab === "forgot" && (
+                    <div>
+                      {!isForgotVerifying ? (
+                        /* STEP 1: INPUT EMAIL UNTUK MINTA KODE */
+                        <form onSubmit={handleRequestResetSubmit} className="space-y-4">
+                          {forgotError && (
+                            <div className="p-3 rounded-2xl bg-pink-50 border border-pink-200 text-xs font-semibold text-pink-700 flex items-center gap-2">
+                              <AlertCircle className="w-4 h-4 shrink-0" />
+                              <span>{forgotError}</span>
+                            </div>
+                          )}
+
+                          <div className="p-3.5 rounded-2xl bg-indigo-50/70 border border-indigo-100 text-xs text-indigo-900 leading-relaxed">
+                            <p className="font-bold flex items-center gap-1.5 text-indigo-700 mb-1">
+                              <KeyRound className="w-4 h-4" />
+                              <span>Pengaturan Ulang Kata Sandi</span>
+                            </p>
+                            <p className="text-[11px] text-indigo-700/80">
+                              Masukkan email student BSI Anda. Kami akan mengirimkan kode verifikasi 6 digit ke inbox email Anda untuk mengatur password baru.
+                            </p>
+                          </div>
+
+                          <div>
+                            <label className="block text-xs font-bold text-gray-700 mb-1.5">
+                              Email Student BSI
+                            </label>
+                            <div className="relative">
+                              <Mail className="w-4 h-4 text-gray-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                              <input
+                                type="email"
+                                value={forgotEmail}
+                                onChange={(e) => {
+                                  setForgotEmail(e.target.value);
+                                  clearFieldError("forgotEmail");
+                                  setForgotError(null);
+                                }}
+                                placeholder="nim@bsi.ac.id"
+                                className={`w-full pl-10 pr-4 py-2.5 rounded-2xl text-sm transition-all focus:outline-none ${
+                                  fieldErrors.forgotEmail
+                                    ? "bg-pink-50/30 border-2 border-pink-500 focus:ring-2 focus:ring-pink-300"
+                                    : "bg-[#F8F9FE] border border-[#E2E8F5] focus:ring-2 focus:ring-indigo-400"
+                                }`}
+                                autoFocus
+                              />
+                            </div>
+                            {fieldErrors.forgotEmail && (
+                              <p className="text-[11px] font-semibold text-pink-600 mt-1 flex items-center gap-1">
+                                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                                {fieldErrors.forgotEmail}
+                              </p>
+                            )}
+                          </div>
+
+                          <button
+                            type="submit"
+                            disabled={isSubmitting}
+                            className="w-full py-3 clay-button-primary text-xs font-bold shadow-md shadow-indigo-500/20 flex items-center justify-center gap-2 mt-2 disabled:opacity-60 disabled:cursor-not-allowed"
+                          >
+                            {isSubmitting ? (
+                              <>
+                                <RefreshCw className="w-4 h-4 animate-spin" />
+                                <span>Mengirim Kode OTP...</span>
+                              </>
+                            ) : (
+                              <>
+                                <span>Kirim Kode Verifikasi</span>
+                                <ArrowRight className="w-4 h-4" />
+                              </>
+                            )}
+                          </button>
+
+                          <div className="pt-2 text-center">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setTab("login");
+                                handleResetForgotForm();
+                              }}
+                              className="inline-flex items-center gap-1.5 text-xs font-bold text-gray-500 hover:text-indigo-600 transition-colors"
+                            >
+                              <ArrowLeft className="w-3.5 h-3.5" />
+                              <span>Kembali ke Halaman Masuk</span>
+                            </button>
+                          </div>
+                        </form>
+                      ) : (
+                        /* STEP 2: INPUT OTP & KATA SANDI BARU */
+                        <form onSubmit={handleVerifyResetSubmit} className="space-y-4">
+                          {forgotError && (
+                            <div className="p-3 rounded-2xl bg-pink-50 border border-pink-200 text-xs font-semibold text-pink-700 flex items-center gap-2">
+                              <AlertCircle className="w-4 h-4 shrink-0" />
+                              <span>{forgotError}</span>
+                            </div>
+                          )}
+
+                          {forgotSuccess && (
+                            <div className="p-3 rounded-2xl bg-indigo-50 border border-indigo-200 text-xs font-semibold text-indigo-700 flex items-center gap-2">
+                              <CheckCircle2 className="w-4 h-4 shrink-0 text-indigo-600" />
+                              <span>{forgotSuccess}</span>
+                            </div>
+                          )}
+
+                          <div>
+                            <label className="block text-xs font-bold text-gray-700 mb-1.5 text-center">
+                              Masukkan Kode Verifikasi 6 Digit
+                            </label>
+                            <input
+                              type="text"
+                              maxLength={6}
+                              value={forgotCode}
+                              onChange={(e) => {
+                                setForgotCode(e.target.value.replace(/[^0-9]/g, ""));
+                                clearFieldError("forgotCode");
+                                setForgotError(null);
+                              }}
+                              placeholder="Contoh: 123456"
+                              className="w-full text-center text-2xl font-bold tracking-widest py-3 bg-[#F8F9FE] border-2 border-indigo-200 rounded-2xl focus:outline-none focus:border-indigo-600 focus:ring-2 focus:ring-indigo-300 font-mono"
+                              autoFocus
+                            />
+                            {fieldErrors.forgotCode && (
+                              <p className="text-[11px] font-semibold text-pink-600 mt-1 flex items-center justify-center gap-1">
+                                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                                {fieldErrors.forgotCode}
+                              </p>
+                            )}
+                          </div>
+
+                          <div>
+                            <label className="block text-xs font-bold text-gray-700 mb-1.5">
+                              Kata Sandi Baru
+                            </label>
+                            <div className="relative">
+                              <Lock className="w-4 h-4 text-gray-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                              <input
+                                type={showForgotNewPassword ? "text" : "password"}
+                                value={forgotNewPassword}
+                                onChange={(e) => {
+                                  setForgotNewPassword(e.target.value);
+                                  clearFieldError("forgotNewPassword");
+                                  setForgotError(null);
+                                }}
+                                placeholder="Minimal 6 karakter"
+                                className={`w-full pl-10 pr-10 py-2.5 rounded-2xl text-sm transition-all focus:outline-none ${
+                                  fieldErrors.forgotNewPassword
+                                    ? "bg-pink-50/30 border-2 border-pink-500 focus:ring-2 focus:ring-pink-300"
+                                    : "bg-[#F8F9FE] border border-[#E2E8F5] focus:ring-2 focus:ring-indigo-400"
+                                }`}
+                              />
+                              <button
+                                type="button"
+                                onClick={() => setShowForgotNewPassword(!showForgotNewPassword)}
+                                className="absolute right-3.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                              >
+                                {showForgotNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                              </button>
+                            </div>
+                            {fieldErrors.forgotNewPassword && (
+                              <p className="text-[11px] font-semibold text-pink-600 mt-1 flex items-center gap-1">
+                                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                                {fieldErrors.forgotNewPassword}
+                              </p>
+                            )}
+                          </div>
+
+                          <div>
+                            <label className="block text-xs font-bold text-gray-700 mb-1.5">
+                              Konfirmasi Kata Sandi Baru
+                            </label>
+                            <div className="relative">
+                              <Lock className="w-4 h-4 text-gray-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                              <input
+                                type={showForgotConfirmPassword ? "text" : "password"}
+                                value={forgotConfirmPassword}
+                                onChange={(e) => {
+                                  setForgotConfirmPassword(e.target.value);
+                                  clearFieldError("forgotConfirmPassword");
+                                  setForgotError(null);
+                                }}
+                                placeholder="Ulangi kata sandi baru"
+                                className={`w-full pl-10 pr-10 py-2.5 rounded-2xl text-sm transition-all focus:outline-none ${
+                                  fieldErrors.forgotConfirmPassword
+                                    ? "bg-pink-50/30 border-2 border-pink-500 focus:ring-2 focus:ring-pink-300"
+                                    : "bg-[#F8F9FE] border border-[#E2E8F5] focus:ring-2 focus:ring-indigo-400"
+                                }`}
+                              />
+                              <button
+                                type="button"
+                                onClick={() => setShowForgotConfirmPassword(!showForgotConfirmPassword)}
+                                className="absolute right-3.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                              >
+                                {showForgotConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                              </button>
+                            </div>
+                            {fieldErrors.forgotConfirmPassword && (
+                              <p className="text-[11px] font-semibold text-pink-600 mt-1 flex items-center gap-1">
+                                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                                {fieldErrors.forgotConfirmPassword}
+                              </p>
+                            )}
+                          </div>
+
+                          <button
+                            type="submit"
+                            disabled={isSubmitting}
+                            className="w-full py-3 clay-button-primary text-xs font-bold shadow-lg shadow-indigo-500/25 flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+                          >
+                            {isSubmitting ? (
+                              <>
+                                <RefreshCw className="w-4 h-4 animate-spin" />
+                                <span>Menyimpan Kata Sandi...</span>
+                              </>
+                            ) : (
+                              <>
+                                <CheckCircle2 className="w-4 h-4" />
+                                <span>Simpan Kata Sandi & Masuk</span>
+                              </>
+                            )}
+                          </button>
+
+                          <div className="flex items-center justify-between pt-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setIsForgotVerifying(false);
+                                setForgotError(null);
+                              }}
+                              className="inline-flex items-center gap-1 text-xs font-semibold text-gray-500 hover:text-gray-800"
+                            >
+                              <ArrowLeft className="w-3.5 h-3.5" />
+                              <span>Ganti Email</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={handleResendResetCode}
+                              className="inline-flex items-center gap-1 text-xs font-bold text-indigo-600 hover:text-indigo-800"
+                            >
+                              <RefreshCw className="w-3.5 h-3.5" />
+                              <span>Kirim Ulang Kode</span>
+                            </button>
+                          </div>
+                        </form>
+                      )}
+                    </div>
                   )}
                 </>
               )}
