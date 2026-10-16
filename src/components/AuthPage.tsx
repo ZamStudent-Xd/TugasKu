@@ -652,24 +652,9 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                       </div>
 
                       <div>
-                        <div className="flex items-center justify-between mb-1.5">
-                          <label className="block text-xs font-bold text-gray-700">
-                            Password
-                          </label>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setTab("forgot");
-                              setFieldErrors({});
-                              setLoginError(null);
-                              setForgotError(null);
-                              if (loginEmail) setForgotEmail(loginEmail);
-                            }}
-                            className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800 transition-colors"
-                          >
-                            Lupa Password?
-                          </button>
-                        </div>
+                        <label className="block text-xs font-bold text-gray-700 mb-1.5">
+                          Password
+                        </label>
                         <div className="relative">
                           <Lock className="w-4 h-4 text-gray-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
                           <input
@@ -700,6 +685,23 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
                             {fieldErrors.loginPassword}
                           </p>
                         )}
+
+                        {/* Tombol Lupa Password di bawah field password & di atas tombol masuk */}
+                        <div className="flex justify-end pt-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTab("forgot");
+                              setFieldErrors({});
+                              setLoginError(null);
+                              setForgotError(null);
+                              if (loginEmail) setForgotEmail(loginEmail);
+                            }}
+                            className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 transition-colors"
+                          >
+                            Lupa Password?
+                          </button>
+                        </div>
                       </div>
 
                       <button
