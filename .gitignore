@@ -48,6 +48,7 @@ next-env.d.ts
 # Database lokal & data rahasia mahasiswa
 /data/
 data/tugasku-db.json
+supabase_backup.json
 
 # Agen & IDE lokal
 .agents/

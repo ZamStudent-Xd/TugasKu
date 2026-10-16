@@ -435,7 +435,12 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
       setCurrentTime(Date.now());
     }, 10000);
 
+    let isSyncing = false;
+    let debounceTimer: any = null;
+
     const syncRealtime = async () => {
+      if (isSyncing) return;
+      isSyncing = true;
       try {
         // Verifikasi realtime apakah akun pengguna masih terdaftar di database
         if (user?.email) {
@@ -482,28 +487,37 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
         setInvitingTask((prev) => (prev ? tData.find((t) => t.id === prev.id) || null : null));
       } catch {
         // silent background error
+      } finally {
+        isSyncing = false;
       }
     };
 
-    // Polling setiap 3 detik
-    const pollInterval = setInterval(syncRealtime, 3000);
+    const triggerDebouncedSync = () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        syncRealtime();
+      }, 500);
+    };
 
-    // Sinkronisasi seketika saat pengguna membuka kembali tab browser
+    // Fallback heartbeat berkala 60 detik (bukan 3 detik) untuk efisiensi bandwidth mutlak
+    const pollInterval = setInterval(syncRealtime, 60000);
+
+    // Sinkronisasi saat pengguna membuka kembali tab browser
     const handleWindowFocus = () => {
-      syncRealtime();
+      triggerDebouncedSync();
     };
     window.addEventListener("focus", handleWindowFocus);
     document.addEventListener("visibilitychange", handleWindowFocus);
 
-    // Supabase Realtime channel jika dikonfigurasi
+    // Supabase Realtime channel jika dikonfigurasi (murni event-based)
     let realtimeChannel: any = null;
     if (isSupabaseConfigured && supabase) {
       try {
         realtimeChannel = supabase
           .channel("tugasku-realtime")
-          .on("postgres_changes", { event: "*", schema: "public", table: "collaboration_invitations" }, () => syncRealtime())
-          .on("postgres_changes", { event: "*", schema: "public", table: "tasks" }, () => syncRealtime())
-          .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, () => syncRealtime())
+          .on("postgres_changes", { event: "*", schema: "public", table: "collaboration_invitations" }, () => triggerDebouncedSync())
+          .on("postgres_changes", { event: "*", schema: "public", table: "tasks" }, () => triggerDebouncedSync())
+          .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, () => triggerDebouncedSync())
           .subscribe();
       } catch {}
     }
@@ -511,6 +525,7 @@ export function MainApp({ initialTab = "dashboard" }: { initialTab?: string }) {
     return () => {
       clearInterval(timeInterval);
       clearInterval(pollInterval);
+      if (debounceTimer) clearTimeout(debounceTimer);
       window.removeEventListener("focus", handleWindowFocus);
       document.removeEventListener("visibilitychange", handleWindowFocus);
       if (realtimeChannel && supabase) {

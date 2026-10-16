@@ -489,9 +489,15 @@ export async function fetchCourses(userParam?: UserProfile | null): Promise<Cour
   const deletedTaskIds = getDeletedTaskIds();
   if (isSupabaseConfigured && supabase && (userId || cleanEmail)) {
     try {
-      const { data: collabRows } = await supabase
-        .from("collaboration_invitations")
-        .select("*");
+      let supaQuery = supabase.from("collaboration_invitations").select("*");
+      const filters: string[] = [];
+      if (cleanEmail) filters.push(`invited_email.eq.${cleanEmail}`);
+      if (userId) filters.push(`invited_by.eq.${userId}`);
+      if (cleanEmail) filters.push(`invited_by.eq.${cleanEmail}`);
+      if (filters.length > 0) {
+        supaQuery = supaQuery.or(filters.join(","));
+      }
+      const { data: collabRows } = await supaQuery;
       if (Array.isArray(collabRows)) {
         for (const row of collabRows) {
           const rowInvitedEmail = (row.invited_email || "").toLowerCase().trim();
@@ -923,7 +929,9 @@ export async function fetchTasks(userParam?: UserProfile | null): Promise<Task[]
     try {
       const { data: collabRows, error: collabErr } = await supabase
         .from("collaboration_invitations")
-        .select("*");
+        .select("*")
+        .neq("task_id", "COURSE_RECORD")
+        .neq("task_id", "PROFILE_RECORD");
 
       if (!collabErr && Array.isArray(collabRows)) {
         supabaseFetchSuccess = true;
@@ -2350,7 +2358,7 @@ export async function fetchRegisteredStudents(query?: string): Promise<UserProfi
                 const updatedAvatar = row.inviter_avatar || (row.task_payload as any)?.avatarUrl;
                 if (updatedAvatar) item.avatarUrl = updatedAvatar;
               }
-            } else {
+            } else if (activeEmailsInProfiles.size > 0) {
               // Hapus PROFILE_RECORD yatim jika akun sudah dihapus dari database
               supabase.from("collaboration_invitations").delete().eq("id", row.id).then(() => {});
             }
@@ -2362,12 +2370,15 @@ export async function fetchRegisteredStudents(query?: string): Promise<UserProfi
     }
 
     // Bersihkan cache lokal dari akun-akun yang telah dihapus di Supabase
-    const localAccounts = getRegisteredAccounts();
-    const cleanLocal = localAccounts.filter((acc) =>
-      acc.user?.email && activeEmailsInProfiles.has(acc.user.email.toLowerCase().trim())
-    );
-    if (cleanLocal.length !== localAccounts.length) {
-      saveRegisteredAccounts(cleanLocal);
+    // HANYA bersihkan jika Supabase sukses mengembalikan data profil aktif (bukan kosong karena error jaringan/timeout)
+    if (activeEmailsInProfiles.size > 0) {
+      const localAccounts = getRegisteredAccounts();
+      const cleanLocal = localAccounts.filter((acc) =>
+        acc.user?.email && activeEmailsInProfiles.has(acc.user.email.toLowerCase().trim())
+      );
+      if (cleanLocal.length !== localAccounts.length) {
+        saveRegisteredAccounts(cleanLocal);
+      }
     }
 
     return list;
