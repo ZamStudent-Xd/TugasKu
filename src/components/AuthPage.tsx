@@ -239,7 +239,7 @@ export function AuthPage({ initialTab = "login", onSuccess }: AuthPageProps) {
       setLoginEmail(savedEmail);
       setLoginPassword("");
       setLoginError(null);
-      setLoginSuccessNotice("Kata sandi berhasil diperbarui! Demi keamanan akun, silakan masuk menggunakan kata sandi baru Anda.");
+      setLoginSuccessNotice("Kata sandi berhasil diperbarui!, silakan masuk menggunakan kata sandi baru Anda.");
       setTab("login");
       if (typeof window !== "undefined") {
         window.history.pushState(null, "", "/login");
